@@ -1,6 +1,7 @@
 package screencast
 
 import (
+	"fmt"
 	"io"
 	"os"
 
@@ -38,31 +39,29 @@ const (
 	PersistModePersistent uint32 = 2
 )
 
-func GetAvailableSourceTypes() (uint32, error) {
-	value, err := apis.GetProperty(interfaceName, "AvailableSourceTypes")
+func getUint32Property(property string) (uint32, error) {
+	value, err := apis.GetProperty(interfaceName, property)
 	if err != nil {
 		return 0, err
 	}
 
-	return value.(uint32), nil
+	result, ok := value.(uint32)
+	if !ok {
+		return 0, fmt.Errorf("property %s returned unexpected type %T", property, value)
+	}
+	return result, nil
+}
+
+func GetAvailableSourceTypes() (uint32, error) {
+	return getUint32Property("AvailableSourceTypes")
 }
 
 func GetAvailableCursorModes() (uint32, error) {
-	value, err := apis.GetProperty(interfaceName, "AvailableCursorModes")
-	if err != nil {
-		return 0, err
-	}
-
-	return value.(uint32), nil
+	return getUint32Property("AvailableCursorModes")
 }
 
 func GetVersion() (uint32, error) {
-	value, err := apis.GetProperty(interfaceName, "version")
-	if err != nil {
-		return 0, err
-	}
-
-	return value.(uint32), nil
+	return getUint32Property("version")
 }
 
 type Stream struct {
@@ -118,19 +117,31 @@ func CreateSession(options *Options) (*Session, error) {
 		return nil, err
 	}
 
-	status, results, err := request.OnSignalResponse(result.(dbus.ObjectPath))
+	requestPath, ok := result.(dbus.ObjectPath)
+	if !ok {
+		return nil, fmt.Errorf("CreateSession returned unexpected type %T", result)
+	}
+
+	status, results, err := request.OnSignalResponse(requestPath)
 	if err != nil {
 		return nil, err
 	} else if status >= request.Cancelled {
 		return nil, nil
 	}
 
-	sessionHandle := results["session_handle"].Value().(string)
+	sessionHandle, ok := results["session_handle"]
+	if !ok {
+		return nil, fmt.Errorf("CreateSession response missing session_handle")
+	}
+	sessionPath, ok := sessionHandle.Value().(string)
+	if !ok {
+		return nil, fmt.Errorf("CreateSession session_handle has unexpected type %T", sessionHandle.Value())
+	}
 	token := ""
 	if options != nil {
 		token = options.HandleToken
 	}
-	return &Session{Path: dbus.ObjectPath(sessionHandle), sessionToken: token}, nil
+	return &Session{Path: dbus.ObjectPath(sessionPath), sessionToken: token}, nil
 }
 
 func (s *Session) SelectSources(options *SelectSourcesOptions) error {
@@ -164,7 +175,12 @@ func (s *Session) SelectSources(options *SelectSourcesOptions) error {
 		return err
 	}
 
-	status, _, err := request.OnSignalResponse(result.(dbus.ObjectPath))
+	requestPath, ok := result.(dbus.ObjectPath)
+	if !ok {
+		return fmt.Errorf("SelectSources returned unexpected type %T", result)
+	}
+
+	status, _, err := request.OnSignalResponse(requestPath)
 	if err != nil {
 		return err
 	} else if status >= request.Cancelled {
@@ -172,23 +188,6 @@ func (s *Session) SelectSources(options *SelectSourcesOptions) error {
 	}
 
 	return nil
-}
-
-func callOnObject(path dbus.ObjectPath, callName string, args ...any) (any, error) {
-	conn, err := dbus.SessionBus()
-	if err != nil {
-		return nil, err
-	}
-
-	obj := conn.Object(apis.ObjectName, path)
-	call := obj.Call(callName, 0, args...)
-	if call.Err != nil {
-		return nil, call.Err
-	}
-
-	var result any
-	err = call.Store(&result)
-	return result, err
 }
 
 func (s *Session) Start(parentWindow string, options *StartOptions) ([]Stream, error) {
@@ -205,7 +204,12 @@ func (s *Session) Start(parentWindow string, options *StartOptions) ([]Stream, e
 		return nil, err
 	}
 
-	status, results, err := request.OnSignalResponse(result.(dbus.ObjectPath))
+	requestPath, ok := result.(dbus.ObjectPath)
+	if !ok {
+		return nil, fmt.Errorf("Start returned unexpected type %T", result)
+	}
+
+	status, results, err := request.OnSignalResponse(requestPath)
 	if err != nil {
 		return nil, err
 	} else if status >= request.Cancelled {
@@ -214,10 +218,15 @@ func (s *Session) Start(parentWindow string, options *StartOptions) ([]Stream, e
 
 	streams := []Stream{}
 
+	streamVariant, ok := results["streams"]
+	if !ok {
+		return nil, nil
+	}
+
 	var rawStreams [][]any
-	if rs, ok := results["streams"].Value().([][]any); ok {
+	if rs, ok := streamVariant.Value().([][]any); ok {
 		rawStreams = rs
-	} else if rs, ok := results["streams"].Value().([]any); ok {
+	} else if rs, ok := streamVariant.Value().([]any); ok {
 		rawStreams = make([][]any, len(rs))
 		for i, r := range rs {
 			if s, ok := r.([]any); ok {
@@ -243,27 +252,29 @@ func (s *Session) Start(parentWindow string, options *StartOptions) ([]Stream, e
 		props, ok := streamSlice[1].(map[string]dbus.Variant)
 		if ok {
 			if pos, ok := props["position"]; ok {
-				posVal := pos.Value().([]any)
-				stream.Position = [2]int32{
-					posVal[0].(int32),
-					posVal[1].(int32),
+				if position, ok := parseInt32Pair(pos.Value()); ok {
+					stream.Position = position
 				}
 			}
 			if size, ok := props["size"]; ok {
-				sizeVal := size.Value().([]any)
-				stream.Size = [2]int32{
-					sizeVal[0].(int32),
-					sizeVal[1].(int32),
+				if parsedSize, ok := parseInt32Pair(size.Value()); ok {
+					stream.Size = parsedSize
 				}
 			}
 			if sourceType, ok := props["source_type"]; ok {
-				stream.SourceType = sourceType.Value().(uint32)
+				if parsedType, ok := sourceType.Value().(uint32); ok {
+					stream.SourceType = parsedType
+				}
 			}
 			if mappingID, ok := props["mapping_id"]; ok {
-				stream.MappingID = mappingID.Value().(string)
+				if parsedID, ok := mappingID.Value().(string); ok {
+					stream.MappingID = parsedID
+				}
 			}
 			if id, ok := props["id"]; ok {
-				stream.ID = id.Value().(string)
+				if parsedID, ok := id.Value().(string); ok {
+					stream.ID = parsedID
+				}
 			}
 		}
 
@@ -274,6 +285,7 @@ func (s *Session) Start(parentWindow string, options *StartOptions) ([]Stream, e
 }
 
 func (s *Session) OpenPipeWireRemote(options *OpenPipeWireRemoteOptions) (int, error) {
+	_ = options
 	data := map[string]dbus.Variant{}
 
 	conn, err := dbus.SessionBus()
@@ -290,6 +302,24 @@ func (s *Session) OpenPipeWireRemote(options *OpenPipeWireRemoteOptions) (int, e
 	var fd int
 	err = call.Store(&fd)
 	return fd, err
+}
+
+func parseInt32Pair(value any) ([2]int32, bool) {
+	values, ok := value.([]any)
+	if !ok || len(values) < 2 {
+		return [2]int32{}, false
+	}
+
+	left, ok := values[0].(int32)
+	if !ok {
+		return [2]int32{}, false
+	}
+	right, ok := values[1].(int32)
+	if !ok {
+		return [2]int32{}, false
+	}
+
+	return [2]int32{left, right}, true
 }
 
 func (s *Session) Close() error {

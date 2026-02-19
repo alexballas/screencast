@@ -1,3 +1,5 @@
+//go:build linux
+
 package pipewire
 
 /*
@@ -33,7 +35,7 @@ static void* pw_lib_handle = NULL;
 
 static int load_pipewire() {
     if (pw_lib_handle != NULL) return 1;
-    
+
     const char* lib_names[] = {
         "libpipewire-0.3.so.0",
         "libpipewire-0.3.so",
@@ -120,7 +122,7 @@ static inline struct pw_stream * create_stream(struct pw_core *core, const char 
                 PW_KEY_MEDIA_CATEGORY, "Capture",
                 PW_KEY_MEDIA_ROLE, "Screen",
                 NULL);
-    
+
     struct pw_stream *stream = d_pw_stream_new(core, name, props);
     if (stream != NULL) {
         data->stream = stream;
@@ -198,7 +200,10 @@ type Stream struct {
 	pr *io.PipeReader
 	pw *io.PipeWriter
 
-	wg sync.WaitGroup
+	wg        sync.WaitGroup
+	startOnce sync.Once
+	closeOnce sync.Once
+	closeErr  error
 }
 
 var (
@@ -238,7 +243,6 @@ func NewStream(fd int, nodeID uint32, width, height uint32) (*Stream, error) {
 	streamsMu.Lock()
 	s.id = nextID
 	nextID++
-	streams[s.id] = s
 	streamsMu.Unlock()
 
 	// dup fd because pw_context_connect_fd takes ownership
@@ -246,21 +250,32 @@ func NewStream(fd int, nodeID uint32, width, height uint32) (*Stream, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dup fd: %v", err)
 	}
+	defer func() {
+		if dupFd >= 0 {
+			_ = syscall.Close(dupFd)
+		}
+	}()
+
+	cleanupOnError := func(err error) (*Stream, error) {
+		_ = s.Close()
+		return nil, err
+	}
 
 	s.loop = C.wrap_pw_main_loop_new()
 	if s.loop == nil {
-		return nil, fmt.Errorf("failed to create main loop")
+		return cleanupOnError(fmt.Errorf("failed to create main loop"))
 	}
 
 	s.context = C.wrap_pw_context_new(s.loop)
 	if s.context == nil {
-		return nil, fmt.Errorf("failed to create context")
+		return cleanupOnError(fmt.Errorf("failed to create context"))
 	}
 
 	s.core = C.wrap_pw_context_connect_fd(s.context, C.int(dupFd))
 	if s.core == nil {
-		return nil, fmt.Errorf("failed to connect fd")
+		return cleanupOnError(fmt.Errorf("failed to connect fd"))
 	}
+	dupFd = -1 // ownership was transferred to PipeWire
 
 	name := C.CString("screencast-capture")
 	defer C.free(unsafe.Pointer(name))
@@ -271,25 +286,30 @@ func NewStream(fd int, nodeID uint32, width, height uint32) (*Stream, error) {
 
 	stream := C.create_stream(s.core, name, s.cData)
 	if stream == nil {
-		C.free(unsafe.Pointer(s.cData))
-		return nil, fmt.Errorf("failed to create stream")
+		return cleanupOnError(fmt.Errorf("failed to create stream"))
 	}
 	s.cData.stream = stream
 
 	res := C.connect_stream(stream, C.uint32_t(nodeID), C.uint32_t(width), C.uint32_t(height), 60, 1)
 	if res < 0 {
-		return nil, fmt.Errorf("failed to connect stream: %d", int(res))
+		return cleanupOnError(fmt.Errorf("failed to connect stream: %d", int(res)))
 	}
+
+	streamsMu.Lock()
+	streams[s.id] = s
+	streamsMu.Unlock()
 
 	return s, nil
 }
 
 func (s *Stream) Start() {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		C.wrap_pw_main_loop_run(s.loop)
-	}()
+	s.startOnce.Do(func() {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			C.wrap_pw_main_loop_run(s.loop)
+		}()
+	})
 }
 
 func (s *Stream) Stop() {
@@ -303,36 +323,40 @@ func (s *Stream) Read(p []byte) (int, error) {
 }
 
 func (s *Stream) Close() error {
-	s.Stop()
-	s.wg.Wait() // wait for main loop to exit fully
+	s.closeOnce.Do(func() {
+		s.Stop()
+		s.wg.Wait() // wait for main loop to exit fully
 
-	s.pw.Close()
-	s.pr.Close()
+		err := errors.Join(s.pw.Close(), s.pr.Close())
 
-	if s.cData != nil {
-		if s.cData.stream != nil {
-			C.wrap_pw_stream_destroy(s.cData.stream)
+		if s.cData != nil {
+			if s.cData.stream != nil {
+				C.wrap_pw_stream_destroy(s.cData.stream)
+			}
+			C.free(unsafe.Pointer(s.cData))
+			s.cData = nil
 		}
-		C.free(unsafe.Pointer(s.cData))
-		s.cData = nil
-	}
-	if s.core != nil {
-		C.wrap_pw_core_disconnect(s.core)
-		s.core = nil
-	}
-	if s.context != nil {
-		C.wrap_pw_context_destroy(s.context)
-		s.context = nil
-	}
-	if s.loop != nil {
-		C.wrap_pw_main_loop_destroy(s.loop)
-		s.loop = nil
-	}
+		if s.core != nil {
+			C.wrap_pw_core_disconnect(s.core)
+			s.core = nil
+		}
+		if s.context != nil {
+			C.wrap_pw_context_destroy(s.context)
+			s.context = nil
+		}
+		if s.loop != nil {
+			C.wrap_pw_main_loop_destroy(s.loop)
+			s.loop = nil
+		}
 
-	streamsMu.Lock()
-	delete(streams, s.id)
-	streamsMu.Unlock()
-	return nil
+		streamsMu.Lock()
+		delete(streams, s.id)
+		streamsMu.Unlock()
+
+		s.closeErr = err
+	})
+
+	return s.closeErr
 }
 
 //export on_state_changed_go

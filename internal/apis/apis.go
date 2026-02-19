@@ -55,21 +55,29 @@ func GetProperty(interfaceName, property string) (any, error) {
 	return value, err
 }
 
-func ListenOnSignal(iface, signalName string) (chan *dbus.Signal, error) {
+func ListenOnSignal(path dbus.ObjectPath, iface, signalName string) (chan *dbus.Signal, error) {
+	_, signal, err := ListenOnSignalWithConn(path, iface, signalName)
+	return signal, err
+}
+
+func ListenOnSignalWithConn(path dbus.ObjectPath, iface, signalName string) (*dbus.Conn, chan *dbus.Signal, error) {
 	conn, err := dbus.SessionBus()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	if path == "" {
+		path = ObjectPath
 	}
 
 	if err := conn.AddMatchSignal(
-		dbus.WithMatchObjectPath(ObjectPath),
+		dbus.WithMatchObjectPath(path),
 		dbus.WithMatchInterface(iface),
 		dbus.WithMatchMember(signalName),
 	); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	signal := make(chan *dbus.Signal)
 	conn.Signal(signal)
-	return signal, nil
+	return conn, signal, nil
 }
