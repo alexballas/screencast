@@ -1,25 +1,36 @@
 # screencast - Unified Screen Capture (BGRA Frames)
 
-A Go package for screen capture with a unified `io.Reader` interface that yields raw `BGRA` frames. Linux is implemented via `xdg-desktop-portal` + PipeWire, with OS-specific capture backends split by build tags.
+A Go package for screen capture with a unified `io.Reader` interface that yields raw `BGRA` frames.
+Supports Linux (`xdg-desktop-portal` + PipeWire), macOS (ScreenCaptureKit), and Windows (Windows Graphics Capture).
 
 ## Features
 
-- **Native UI Prompts:** Triggers the native OS dialog for the user to select specific screens or windows to capture.
-- **Zero-Copy Performance:** Uses `cgo` and `libpipewire-0.3` to access PipeWire's shared-memory DMA-BUF/memfd buffers, avoiding expensive memory copies.
+- **Cross-Platform:** Native OS dialogs or direct capture APIs on Linux, macOS 13+, and Windows 10+.
+- **Zero-Copy Performance (Linux):** Uses `cgo` and `libpipewire-0.3` to access PipeWire's shared-memory DMA-BUF/memfd buffers, avoiding expensive memory copies.
 - **Unified `io.Reader` Interface:** Pipe raw `BGRA` frames directly into `ffmpeg` or any standard Go stream.
-- **Graceful Fallback:** Dynamically loads the PipeWire C library at runtime (`dlopen`). The binary will not crash on systems where PipeWire is not installed; it will simply return an error.
+- **Audio Capture:** Optional system audio capture (48kHz, 16-bit, stereo) on supported platforms.
+- **Graceful Fallback:** Dynamically loads the PipeWire C library at runtime (`dlopen`).
 
 ## Requirements
 
-- Linux with [xdg-desktop-portal](https://github.com/flatpak/xdg-desktop-portal)
+### Linux
+- [xdg-desktop-portal](https://github.com/flatpak/xdg-desktop-portal)
 - [PipeWire](https://pipewire.org/) running
 - DBus session bus
 - `libpipewire-0.3-dev` (Only required at **build time** for C headers)
 
+### macOS
+- macOS 13.0 or later
+- CGO enabled
+
+### Windows
+- Windows 10 (1809) or later
+- CGO enabled with a C/C++ compiler (e.g., MSYS2/MinGW-w64)
+
 ## Installation
 
 ```bash
-# Ubuntu / Debian build requirements
+# Ubuntu / Debian build requirements (Linux only)
 sudo apt install libpipewire-0.3-dev pkg-config
 
 # Get the Go package
@@ -35,6 +46,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -44,15 +56,31 @@ import (
 )
 
 func main() {
+	// Audio is enabled by default. Use &capture.Options{IncludeAudio: false} to disable.
 	stream, err := capture.Open(nil)
 	if err != nil {
 		log.Fatalf("Failed to open capture stream: %v", err)
 	}
 	defer stream.Close()
 
+	if stream.Audio != nil {
+		fmt.Println("Audio capture enabled (draining in background)")
+		go func() {
+			_, _ = io.Copy(io.Discard, stream.Audio)
+		}()
+	}
+
 	frameRate := stream.FrameRate
 	if frameRate == 0 {
 		frameRate = 60
+	}
+
+	width, height := stream.Width, stream.Height
+	if width == 0 || height == 0 {
+		// On Windows and macOS, the resolution is populated asynchronously after the first frame.
+		// For this basic FFmpeg example, we fallback to a default if it's not immediately available.
+		width, height = 1920, 1080
+		fmt.Printf("Warning: Initial resolution is 0x0. Defaulting to %dx%d for FFmpeg.\n", width, height)
 	}
 
 	// Pipe the io.Reader directly into FFmpeg
@@ -60,7 +88,7 @@ func main() {
 		"-y", "-re",
 		"-f", "rawvideo",
 		"-pix_fmt", "bgra",
-		"-s", fmt.Sprintf("%dx%d", stream.Width, stream.Height),
+		"-s", fmt.Sprintf("%dx%d", width, height),
 		"-r", strconv.FormatUint(uint64(frameRate), 10),
 		"-i", "pipe:0", // Read from stdin
 		"-c:v", "libx264",
@@ -89,8 +117,8 @@ go run examples/capture/main.go
 ## Cross-Platform Status
 
 - **Linux:** Implemented (`xdg-desktop-portal` + PipeWire)
-- **macOS:** API surface in place; backend target is ScreenCaptureKit (`SCStream`)
-- **Windows:** API surface in place; backend target is Windows Graphics Capture (WGC)
+- **macOS:** Implemented (ScreenCaptureKit)
+- **Windows:** Implemented (Windows Graphics Capture)
 
 ## License
 

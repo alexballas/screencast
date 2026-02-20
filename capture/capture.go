@@ -42,5 +42,10 @@ type Stream struct {
 // Open initializes an OS-specific screen capture backend and returns a unified
 // BGRA frame reader.
 func Open(options *Options) (*Stream, error) {
+	if options == nil {
+		options = &Options{
+			IncludeAudio: true,
+		}
+	}
 	return open(options)
 }

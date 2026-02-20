@@ -18,9 +18,8 @@ func main() {
 	fmt.Println("Screen capture with live transcoding to H.264...")
 	fmt.Println("Press Ctrl+C to stop")
 
-	stream, err := capture.Open(&capture.Options{
-		IncludeAudio: true,
-	})
+	// Audio is enabled by default.
+	stream, err := capture.Open(nil)
 	if err != nil {
 		log.Fatalf("Failed to open capture stream: %v", err)
 	}
@@ -34,6 +33,11 @@ func main() {
 	}
 
 	width, height := stream.Width, stream.Height
+	if width == 0 || height == 0 {
+		width, height = 1920, 1080
+		fmt.Printf("Warning: Initial resolution is 0x0. Defaulting to %dx%d for FFmpeg.\n", width, height)
+	}
+
 	frameRate := stream.FrameRate
 	if frameRate == 0 {
 		frameRate = 60
