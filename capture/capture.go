@@ -21,11 +21,17 @@ var (
 type Options struct {
 	// StreamIndex selects the stream from the OS chooser result. Default is 0.
 	StreamIndex int
+	// IncludeAudio requests that the system's default audio output also be captured.
+	IncludeAudio bool
 }
 
 // Stream is a unified raw frame source. Read yields raw BGRA bytes.
 type Stream struct {
-	io.ReadCloser
+	io.ReadCloser // Reads video frames
+
+	// Audio is an optional reader that yields raw PCM audio bytes when IncludeAudio is true.
+	// Format is standardized to 48kHz, 16-bit, stereo.
+	Audio io.ReadCloser
 
 	Width       uint32
 	Height      uint32

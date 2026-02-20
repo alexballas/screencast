@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/godbus/dbus/v5"
 	"go2tv.app/screencast/internal/apis"
 	"go2tv.app/screencast/internal/convert"
-	"github.com/godbus/dbus/v5"
 )
 
 const (

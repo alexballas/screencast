@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -17,11 +18,20 @@ func main() {
 	fmt.Println("Screen capture with live transcoding to H.264...")
 	fmt.Println("Press Ctrl+C to stop")
 
-	stream, err := capture.Open(nil)
+	stream, err := capture.Open(&capture.Options{
+		IncludeAudio: true,
+	})
 	if err != nil {
 		log.Fatalf("Failed to open capture stream: %v", err)
 	}
 	defer stream.Close()
+
+	if stream.Audio != nil {
+		fmt.Println("Audio capture enabled (draining in background)")
+		go func() {
+			_, _ = io.Copy(io.Discard, stream.Audio)
+		}()
+	}
 
 	width, height := stream.Width, stream.Height
 	frameRate := stream.FrameRate

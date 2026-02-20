@@ -19,6 +19,10 @@ func NewStream(fd int, nodeID uint32, width, height uint32) (*Stream, error) {
 	return nil, ErrLibraryNotLoaded
 }
 
+func NewAudioStream() (*Stream, error) {
+	return nil, ErrLibraryNotLoaded
+}
+
 func (s *Stream) Start() {}
 
 func (s *Stream) Stop() {}

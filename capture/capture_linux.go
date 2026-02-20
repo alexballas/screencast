@@ -5,6 +5,7 @@ package capture
 import (
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"syscall"
 
@@ -104,6 +105,17 @@ func open(options *Options) (*Stream, error) {
 	}
 	pwStream.Start()
 
+	var audioReader io.ReadCloser
+	if options.IncludeAudio {
+		audioStream, err := pipewire.NewAudioStream()
+		if err != nil {
+			pwStream.Close()
+			return nil, err
+		}
+		audioStream.Start()
+		audioReader = audioStream
+	}
+
 	reader := &linuxReadCloser{
 		stream: pwStream,
 		sess:   sess,
@@ -112,6 +124,7 @@ func open(options *Options) (*Stream, error) {
 	cleanupSession = false
 	return &Stream{
 		ReadCloser:  reader,
+		Audio:       audioReader,
 		Width:       uint32(selected.Size[0]),
 		Height:      uint32(selected.Size[1]),
 		FrameRate:   defaultLinuxFrameRate,

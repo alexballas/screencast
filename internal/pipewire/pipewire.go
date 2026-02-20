@@ -7,6 +7,7 @@ package pipewire
 #cgo LDFLAGS: -ldl
 #include <pipewire/pipewire.h>
 #include <spa/param/video/format-utils.h>
+#include <spa/param/audio/format-utils.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
@@ -22,6 +23,7 @@ static void (*d_pw_main_loop_destroy)(struct pw_main_loop *loop);
 static struct pw_context * (*d_pw_context_new)(struct pw_loop *main_loop, struct pw_properties *props, size_t user_data_size);
 static void (*d_pw_context_destroy)(struct pw_context *context);
 static struct pw_core * (*d_pw_context_connect_fd)(struct pw_context *context, int fd, struct pw_properties *properties, size_t user_data_size);
+static struct pw_core * (*d_pw_context_connect)(struct pw_context *context, struct pw_properties *properties, size_t user_data_size);
 static int (*d_pw_core_disconnect)(struct pw_core *core);
 static struct pw_properties * (*d_pw_properties_new)(const char *key, ...);
 static struct pw_stream * (*d_pw_stream_new)(struct pw_core *core, const char *name, struct pw_properties *props);
@@ -58,6 +60,7 @@ static int load_pipewire() {
     d_pw_context_new = dlsym(pw_lib_handle, "pw_context_new");
     d_pw_context_destroy = dlsym(pw_lib_handle, "pw_context_destroy");
     d_pw_context_connect_fd = dlsym(pw_lib_handle, "pw_context_connect_fd");
+    d_pw_context_connect = dlsym(pw_lib_handle, "pw_context_connect");
     d_pw_core_disconnect = dlsym(pw_lib_handle, "pw_core_disconnect");
     d_pw_properties_new = dlsym(pw_lib_handle, "pw_properties_new");
     d_pw_stream_new = dlsym(pw_lib_handle, "pw_stream_new");
@@ -170,6 +173,44 @@ static inline void wrap_pw_init() { d_pw_init(NULL, NULL); }
 static inline struct pw_main_loop * wrap_pw_main_loop_new() { return d_pw_main_loop_new(NULL); }
 static inline struct pw_context * wrap_pw_context_new(struct pw_main_loop *loop) { return d_pw_context_new(d_pw_main_loop_get_loop(loop), NULL, 0); }
 static inline struct pw_core * wrap_pw_context_connect_fd(struct pw_context *context, int fd) { return d_pw_context_connect_fd(context, fd, NULL, 0); }
+static inline struct pw_core * wrap_pw_context_connect(struct pw_context *context) { return d_pw_context_connect(context, NULL, 0); }
+
+static inline struct pw_stream * create_audio_stream(struct pw_core *core, const char *name, struct go_stream_data *data) {
+    struct pw_properties *props = d_pw_properties_new(
+                PW_KEY_MEDIA_TYPE, "Audio",
+                PW_KEY_MEDIA_CATEGORY, "Capture",
+                PW_KEY_STREAM_CAPTURE_SINK, "true",
+                NULL);
+
+    struct pw_stream *stream = d_pw_stream_new(core, name, props);
+    if (stream != NULL) {
+        data->stream = stream;
+        d_pw_stream_add_listener(stream, &data->stream_listener, &stream_events, data);
+    }
+    return stream;
+}
+
+static inline int connect_audio_stream(struct pw_stream *stream) {
+    uint8_t buffer[1024];
+    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+
+    const struct spa_pod *params[1];
+    params[0] = spa_pod_builder_add_object(&b,
+        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_audio),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+        SPA_FORMAT_AUDIO_format, SPA_POD_Id(SPA_AUDIO_FORMAT_S16),
+        SPA_FORMAT_AUDIO_rate, SPA_POD_Int(48000),
+        SPA_FORMAT_AUDIO_channels, SPA_POD_Int(2));
+
+    return d_pw_stream_connect(stream,
+        PW_DIRECTION_INPUT,
+        (uint32_t)-1,
+        PW_STREAM_FLAG_AUTOCONNECT |
+        PW_STREAM_FLAG_MAP_BUFFERS,
+        params, 1);
+}
+
 static inline void wrap_pw_main_loop_run(struct pw_main_loop *loop) { d_pw_main_loop_run(loop); }
 static inline void wrap_pw_main_loop_quit(struct pw_main_loop *loop) { d_pw_main_loop_quit(loop); }
 static inline void wrap_pw_stream_destroy(struct pw_stream *stream) { d_pw_stream_destroy(stream); }
@@ -376,4 +417,65 @@ func on_frame_go(id C.int, data unsafe.Pointer, size C.uint32_t) {
 
 	byteSlice := unsafe.Slice((*byte)(data), int(size))
 	s.pw.Write(byteSlice)
+}
+
+func NewAudioStream() (*Stream, error) {
+	if !IsAvailable() {
+		return nil, ErrLibraryNotLoaded
+	}
+
+	pr, pw := io.Pipe()
+	s := &Stream{
+		pr: pr,
+		pw: pw,
+	}
+
+	streamsMu.Lock()
+	s.id = nextID
+	nextID++
+	streamsMu.Unlock()
+
+	cleanupOnError := func(err error) (*Stream, error) {
+		_ = s.Close()
+		return nil, err
+	}
+
+	s.loop = C.wrap_pw_main_loop_new()
+	if s.loop == nil {
+		return cleanupOnError(fmt.Errorf("failed to create main loop"))
+	}
+
+	s.context = C.wrap_pw_context_new(s.loop)
+	if s.context == nil {
+		return cleanupOnError(fmt.Errorf("failed to create context"))
+	}
+
+	s.core = C.wrap_pw_context_connect(s.context)
+	if s.core == nil {
+		return cleanupOnError(fmt.Errorf("failed to connect to pipewire daemon"))
+	}
+
+	name := C.CString("screencast-audio-capture")
+	defer C.free(unsafe.Pointer(name))
+
+	s.cData = (*C.struct_go_stream_data)(C.malloc(C.sizeof_struct_go_stream_data))
+	s.cData.id = C.int(s.id)
+	s.cData.stream = nil
+
+	stream := C.create_audio_stream(s.core, name, s.cData)
+	if stream == nil {
+		return cleanupOnError(fmt.Errorf("failed to create audio stream"))
+	}
+	s.cData.stream = stream
+
+	res := C.connect_audio_stream(stream)
+	if res < 0 {
+		return cleanupOnError(fmt.Errorf("failed to connect audio stream: %d", int(res)))
+	}
+
+	streamsMu.Lock()
+	streams[s.id] = s
+	streamsMu.Unlock()
+
+	return s, nil
 }
