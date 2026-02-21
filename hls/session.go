@@ -19,17 +19,29 @@ import (
 )
 
 const (
-	defaultDeleteThreshold = 24
+	defaultDeleteThreshold = 36
 	defaultStartupTimeout  = 25 * time.Second
 	defaultTempDirPrefix   = "screencast-hls-"
 	defaultMaxFrameRate    = 60
 	defaultHighResCapFPS   = 30
+	defaultVideoQueueSize  = 2048
+	defaultAudioQueueSize  = 8192
+	defaultAudioChunkSize  = 4096
+	defaultAudioRelayQueue = 384
+	defaultHLSTimeSeconds  = 2
+	defaultHLSListSize     = 24
 )
 
 type Options struct {
 	FFmpegPath         string
 	IncludeAudio       bool
 	HLSDeleteThreshold int
+	HLSTimeSeconds     int
+	HLSListSize        int
+	VideoQueueSize     int
+	AudioQueueSize     int
+	AudioChunkSize     int
+	AudioRelayQueue    int
 	StartupTimeout     time.Duration
 	TempDirPrefix      string
 	LogOutput          io.Writer
@@ -61,6 +73,11 @@ func Start(options *Options) (*Session, error) {
 
 	fps := targetFPS(stream)
 	fpsArg := strconv.FormatUint(uint64(fps), 10)
+	gopFrames := uint64(fps) * uint64(opts.HLSTimeSeconds)
+	if gopFrames == 0 {
+		gopFrames = uint64(fps)
+	}
+	gopArg := strconv.FormatUint(gopFrames, 10)
 	tempDir, err := os.MkdirTemp("", opts.TempDirPrefix)
 	if err != nil {
 		_ = stream.Close()
@@ -91,7 +108,7 @@ func Start(options *Options) (*Session, error) {
 				return
 			}
 			defer conn.Close()
-			relayAudioWithDrop(conn, audio, 4096, 96)
+			relayAudioWithDrop(conn, audio, opts.AudioChunkSize, opts.AudioRelayQueue)
 		}(audioL, stream.Audio)
 
 		audioURL = fmt.Sprintf("tcp://%s", audioL.Addr().String())
@@ -105,7 +122,7 @@ func Start(options *Options) (*Session, error) {
 		"-flags", "low_delay",
 		"-probesize", "32",
 		"-analyzeduration", "0",
-		"-thread_queue_size", "512",
+		"-thread_queue_size", strconv.Itoa(opts.VideoQueueSize),
 		"-f", "rawvideo",
 		"-pix_fmt", strings.ToLower(stream.PixelFormat),
 		"-s", fmt.Sprintf("%dx%d", stream.Width, stream.Height),
@@ -114,7 +131,7 @@ func Start(options *Options) (*Session, error) {
 	}
 	if audioEnabled {
 		args = append(args,
-			"-thread_queue_size", "2048",
+			"-thread_queue_size", strconv.Itoa(opts.AudioQueueSize),
 			"-f", "s16le",
 			"-ar", "48000",
 			"-ac", "2",
@@ -139,10 +156,10 @@ func Start(options *Options) (*Session, error) {
 		"-bufsize", "6000k",
 		"-pix_fmt", "yuv420p",
 		"-vf", vf,
-		"-g", fpsArg,
-		"-keyint_min", fpsArg,
+		"-g", gopArg,
+		"-keyint_min", gopArg,
 		"-sc_threshold", "0",
-		"-force_key_frames", "expr:gte(t,n_forced*1)",
+		"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", opts.HLSTimeSeconds),
 	)
 	if audioEnabled {
 		args = append(args,
@@ -154,8 +171,8 @@ func Start(options *Options) (*Session, error) {
 	}
 	args = append(args,
 		"-f", "hls",
-		"-hls_time", "1",
-		"-hls_list_size", "12",
+		"-hls_time", strconv.Itoa(opts.HLSTimeSeconds),
+		"-hls_list_size", strconv.Itoa(opts.HLSListSize),
 		"-hls_allow_cache", "0",
 		"-hls_flags", "independent_segments+omit_endlist+delete_segments",
 		"-hls_delete_threshold", strconv.Itoa(opts.HLSDeleteThreshold),
@@ -287,6 +304,54 @@ func normalizeOptions(options *Options) (*Options, error) {
 	if opts.HLSDeleteThreshold > 120 {
 		opts.HLSDeleteThreshold = 120
 	}
+	if opts.HLSTimeSeconds == 0 {
+		opts.HLSTimeSeconds = defaultHLSTimeSeconds
+	} else if opts.HLSTimeSeconds < 1 {
+		opts.HLSTimeSeconds = 1
+	}
+	if opts.HLSTimeSeconds > 6 {
+		opts.HLSTimeSeconds = 6
+	}
+	if opts.HLSListSize == 0 {
+		opts.HLSListSize = defaultHLSListSize
+	} else if opts.HLSListSize < 3 {
+		opts.HLSListSize = 3
+	}
+	if opts.HLSListSize > 120 {
+		opts.HLSListSize = 120
+	}
+	if opts.VideoQueueSize == 0 {
+		opts.VideoQueueSize = defaultVideoQueueSize
+	} else if opts.VideoQueueSize < 128 {
+		opts.VideoQueueSize = 128
+	}
+	if opts.VideoQueueSize > 16384 {
+		opts.VideoQueueSize = 16384
+	}
+	if opts.AudioQueueSize == 0 {
+		opts.AudioQueueSize = defaultAudioQueueSize
+	} else if opts.AudioQueueSize < 256 {
+		opts.AudioQueueSize = 256
+	}
+	if opts.AudioQueueSize > 32768 {
+		opts.AudioQueueSize = 32768
+	}
+	if opts.AudioChunkSize == 0 {
+		opts.AudioChunkSize = defaultAudioChunkSize
+	} else if opts.AudioChunkSize < 512 {
+		opts.AudioChunkSize = 512
+	}
+	if opts.AudioChunkSize > 32768 {
+		opts.AudioChunkSize = 32768
+	}
+	if opts.AudioRelayQueue == 0 {
+		opts.AudioRelayQueue = defaultAudioRelayQueue
+	} else if opts.AudioRelayQueue < 8 {
+		opts.AudioRelayQueue = 8
+	}
+	if opts.AudioRelayQueue > 4096 {
+		opts.AudioRelayQueue = 4096
+	}
 
 	return &opts, nil
 }
@@ -356,10 +421,10 @@ func playlistReady(path, baseDir string) bool {
 
 func relayAudioWithDrop(dst io.Writer, src io.Reader, chunkSize, queueSize int) {
 	if chunkSize <= 0 {
-		chunkSize = 4096
+		chunkSize = defaultAudioChunkSize
 	}
 	if queueSize <= 0 {
-		queueSize = 96
+		queueSize = defaultAudioRelayQueue
 	}
 
 	ch := make(chan []byte, queueSize)

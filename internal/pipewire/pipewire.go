@@ -303,8 +303,8 @@ import (
 var ErrLibraryNotLoaded = errors.New("libpipewire-0.3.so.0 could not be loaded")
 
 const (
-	videoQueueSize = 2
-	audioQueueSize = 96
+	videoQueueSize = 8
+	audioQueueSize = 384
 )
 
 type Stream struct {
