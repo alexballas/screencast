@@ -3,7 +3,7 @@
 package capture
 
 /*
-#cgo CXXFLAGS: -std=c++17
+#cgo CXXFLAGS: -std=gnu++20
 #cgo LDFLAGS: -lwindowsapp -ld3d11 -lole32 -lstdc++
 #include "capture_windows.h"
 #include <stdlib.h>

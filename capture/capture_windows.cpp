@@ -6,7 +6,17 @@
 #include <winrt/Windows.Graphics.DirectX.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include <windows.graphics.capture.interop.h>
+#if __has_include(<windows.graphics.directx.direct3d11.interop.h>)
 #include <windows.graphics.directx.direct3d11.interop.h>
+#else
+// MinGW/MSYS2 package lag: this header may be missing. Keep equivalent declarations local.
+struct __declspec(uuid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")) IDirect3DDxgiInterfaceAccess : IInspectable {
+	virtual HRESULT STDMETHODCALLTYPE GetInterface(REFIID id, void **object) = 0;
+};
+
+extern "C" HRESULT __stdcall CreateDirect3D11DeviceFromDXGIDevice(IUnknown *dxgiDevice, IInspectable **graphicsDevice);
+extern "C" HRESULT __stdcall CreateDirect3D11SurfaceFromDXGISurface(IUnknown *dxgiSurface, IInspectable **graphicsSurface);
+#endif
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <mmdeviceapi.h>
