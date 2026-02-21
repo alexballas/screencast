@@ -65,7 +65,9 @@
         [self.stream addStreamOutput:self type:SCStreamOutputTypeScreen sampleHandlerQueue:self.queue error:&err];
         
         if (includeAudio) {
-            [self.stream addStreamOutput:self type:SCStreamOutputTypeAudio sampleHandlerQueue:self.queue error:&err];
+            if (@available(macOS 13.0, *)) {
+                [self.stream addStreamOutput:self type:SCStreamOutputTypeAudio sampleHandlerQueue:self.queue error:&err];
+            }
         }
     }
     return self;
@@ -100,16 +102,20 @@
             self.videoCallback(self.goID, baseAddress, (uint32_t)(bytesPerRow * height), (uint32_t)width, (uint32_t)height);
         }
         CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
-    } else if (type == SCStreamOutputTypeAudio) {
-        CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
-        if (!blockBuffer) return;
-        
-        size_t lengthAtOffset, totalLength;
-        char *dataPointer;
-        OSStatus status = CMBlockBufferGetDataPointer(blockBuffer, 0, &lengthAtOffset, &totalLength, &dataPointer);
-        
-        if (status == kCMBlockBufferNoErr && dataPointer && self.audioCallback) {
-            self.audioCallback(self.goID, dataPointer, (uint32_t)totalLength);
+    } else {
+        if (@available(macOS 13.0, *)) {
+            if (type == SCStreamOutputTypeAudio) {
+                CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
+                if (!blockBuffer) return;
+                
+                size_t lengthAtOffset, totalLength;
+                char *dataPointer;
+                OSStatus status = CMBlockBufferGetDataPointer(blockBuffer, 0, &lengthAtOffset, &totalLength, &dataPointer);
+                
+                if (status == kCMBlockBufferNoErr && dataPointer && self.audioCallback) {
+                    self.audioCallback(self.goID, dataPointer, (uint32_t)totalLength);
+                }
+            }
         }
     }
 }
