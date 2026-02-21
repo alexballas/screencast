@@ -21,7 +21,6 @@ extern "C" HRESULT __stdcall CreateDirect3D11SurfaceFromDXGISurface(IUnknown *dx
 #include <dxgi1_2.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
-#include <thread>
 #include <atomic>
 #include <vector>
 
@@ -41,7 +40,7 @@ struct WinCaptureSession {
     bool includeAudio;
     
     std::atomic<bool> isRunning{false};
-    std::thread audioThread;
+    HANDLE audioThread{nullptr};
     
     winrt::com_ptr<ID3D11Device> d3dDevice;
     winrt::com_ptr<ID3D11DeviceContext> d3dContext;
@@ -86,9 +85,10 @@ static BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC, LPRECT lprcMonitor,
     return TRUE;
 }
 
-void AudioCaptureLoop(WinCaptureSession* sess) {
+static DWORD WINAPI AudioCaptureThreadProc(LPVOID param) {
+    WinCaptureSession* sess = static_cast<WinCaptureSession*>(param);
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (FAILED(hr)) return;
+    if (FAILED(hr)) return 1;
 
     UINT32 packetLength = 0;
     while (sess->isRunning) {
@@ -121,6 +121,7 @@ void AudioCaptureLoop(WinCaptureSession* sess) {
         }
     }
     CoUninitialize();
+    return 0;
 }
 
 void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCallback vcb, WinAudioFrameCallback acb) {
@@ -241,7 +242,10 @@ void StartWinCapture(void* ctx) {
     sess->session.StartCapture();
     if (sess->includeAudio) {
         sess->audioClient->Start();
-        sess->audioThread = std::thread(AudioCaptureLoop, sess);
+        sess->audioThread = CreateThread(nullptr, 0, AudioCaptureThreadProc, sess, 0, nullptr);
+        if (sess->audioThread == nullptr) {
+            sess->audioClient->Stop();
+        }
     }
 }
 
@@ -254,8 +258,10 @@ void StopWinCapture(void* ctx) {
     if (sess->includeAudio) {
         sess->audioClient->Stop();
         SetEvent(sess->audioEvent);
-        if (sess->audioThread.joinable()) {
-            sess->audioThread.join();
+        if (sess->audioThread != nullptr) {
+            WaitForSingleObject(sess->audioThread, INFINITE);
+            CloseHandle(sess->audioThread);
+            sess->audioThread = nullptr;
         }
         CloseHandle(sess->audioEvent);
     }

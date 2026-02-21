@@ -26,6 +26,7 @@ Supports Linux (`xdg-desktop-portal` + PipeWire), macOS (ScreenCaptureKit), and 
 ### Windows
 - Windows 10 (1809) or later
 - CGO enabled with a C/C++ compiler (e.g., MSYS2/MinGW-w64)
+- Uses Windows Graphics Capture (WinRT + D3D11). Windows 8.1 and older are not supported and may fail at runtime even if the application starts.
 
 ## Installation
 
@@ -119,6 +120,7 @@ go run examples/capture/main.go
 - **Linux:** Implemented (`xdg-desktop-portal` + PipeWire)
 - **macOS:** Implemented (ScreenCaptureKit)
 - **Windows:** Implemented (Windows Graphics Capture)
+  - Limitation: requires Windows 10 version 1809 or newer.
 
 ## License
 

@@ -4,7 +4,7 @@ package capture
 
 /*
 #cgo CXXFLAGS: -std=gnu++20
-#cgo LDFLAGS: -lwindowsapp -ld3d11 -lole32 -static-libstdc++ -static-libgcc -Wl,-Bstatic -l:libwinpthread.a -Wl,-Bdynamic
+#cgo LDFLAGS: -lwindowsapp -ld3d11 -lole32 -static-libstdc++ -static-libgcc
 #include "capture_windows.h"
 #include <stdlib.h>
 
