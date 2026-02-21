@@ -8,6 +8,7 @@ import (
 	"io"
 	"sync"
 	"syscall"
+	"time"
 
 	"go2tv.app/screencast/internal/pipewire"
 	"go2tv.app/screencast/screencast"
@@ -17,6 +18,7 @@ const defaultLinuxFrameRate = 60
 
 type linuxReadCloser struct {
 	stream *pipewire.Stream
+	audio  *pipewire.Stream
 	sess   *screencast.Session
 
 	once sync.Once
@@ -30,8 +32,12 @@ func (r *linuxReadCloser) Read(p []byte) (int, error) {
 func (r *linuxReadCloser) Close() error {
 	r.once.Do(func() {
 		streamErr := r.stream.Close()
+		var audioErr error
+		if r.audio != nil {
+			audioErr = r.audio.Close()
+		}
 		sessErr := r.sess.Close()
-		r.err = errors.Join(streamErr, sessErr)
+		r.err = errors.Join(streamErr, audioErr, sessErr)
 	})
 
 	return r.err
@@ -104,10 +110,17 @@ func open(options *Options) (*Stream, error) {
 		return nil, err
 	}
 	pwStream.Start()
+	frameRate := pwStream.WaitFrameRate(1200 * time.Millisecond)
+	if frameRate == 0 {
+		frameRate = defaultLinuxFrameRate
+	}
 
-	var audioReader io.ReadCloser
+	var (
+		audioReader io.ReadCloser
+		audioStream *pipewire.Stream
+	)
 	if options.IncludeAudio {
-		audioStream, err := pipewire.NewAudioStream()
+		audioStream, err = pipewire.NewAudioStream()
 		if err != nil {
 			pwStream.Close()
 			return nil, err
@@ -118,6 +131,7 @@ func open(options *Options) (*Stream, error) {
 
 	reader := &linuxReadCloser{
 		stream: pwStream,
+		audio:  audioStream,
 		sess:   sess,
 	}
 
@@ -127,7 +141,7 @@ func open(options *Options) (*Stream, error) {
 		Audio:       audioReader,
 		Width:       uint32(selected.Size[0]),
 		Height:      uint32(selected.Size[1]),
-		FrameRate:   defaultLinuxFrameRate,
+		FrameRate:   frameRate,
 		PixelFormat: PixelFormatBGRA,
 	}, nil
 }
