@@ -58,7 +58,7 @@
             }
         }
         
-        SCDisplayFilter *filter = [[SCDisplayFilter alloc] initWithDisplay:targetDisplay excludingWindows:@[]];
+        SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:targetDisplay excludingWindows:@[]];
         
         self.stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:self];
         NSError *err = nil;

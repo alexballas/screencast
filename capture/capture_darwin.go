@@ -3,8 +3,8 @@
 package capture
 
 /*
-#cgo CFLAGS: -x objective-c
-#cgo LDFLAGS: -framework Foundation -framework ScreenCaptureKit -framework CoreMedia -framework CoreVideo
+#cgo CFLAGS: -x objective-c -mmacosx-version-min=12.3
+#cgo LDFLAGS: -mmacosx-version-min=12.3 -framework Foundation -framework ScreenCaptureKit -framework CoreMedia -framework CoreVideo
 #include "capture_darwin.h"
 #include <stdlib.h>
 
