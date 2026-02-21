@@ -10,7 +10,7 @@
 #include <windows.graphics.directx.direct3d11.interop.h>
 #else
 // MinGW/MSYS2 package lag: this header may be missing. Keep equivalent declarations local.
-struct __declspec(uuid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")) IDirect3DDxgiInterfaceAccess : IInspectable {
+struct IDirect3DDxgiInterfaceAccess : IUnknown {
 	virtual HRESULT STDMETHODCALLTYPE GetInterface(REFIID id, void **object) = 0;
 };
 
@@ -171,7 +171,12 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
         if (!frame) return;
         
         winrt::com_ptr<ID3D11Texture2D> surfaceTexture;
-        auto surfaceInterop = frame.Surface().as<Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+        auto surfaceUnknown = frame.Surface().template as<::IUnknown>();
+        winrt::com_ptr<IDirect3DDxgiInterfaceAccess> surfaceInterop;
+        constexpr GUID kDirect3DDxgiInterfaceAccessIID = {0xA9B3D012, 0x3DF2, 0x4EE3, {0xB8, 0xD1, 0x86, 0x95, 0xF4, 0x57, 0xD3, 0xC1}};
+        if (FAILED(surfaceUnknown->QueryInterface(kDirect3DDxgiInterfaceAccessIID, surfaceInterop.put_void()))) {
+            return;
+        }
         surfaceInterop->GetInterface(winrt::guid_of<ID3D11Texture2D>(), surfaceTexture.put_void());
         
         D3D11_TEXTURE2D_DESC desc;
