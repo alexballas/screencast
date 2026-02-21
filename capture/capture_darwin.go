@@ -33,6 +33,7 @@ type macStreamContext struct {
 	id         int
 	width      uint32
 	height     uint32
+	ready      chan struct{}
 	widthOnce  sync.Once
 	heightOnce sync.Once
 }
@@ -96,6 +97,7 @@ func macVideoCallbackGo(id C.int, data unsafe.Pointer, size C.uint32_t, width C.
 	})
 	ctxInfo.heightOnce.Do(func() {
 		ctxInfo.height = uint32(height)
+		close(ctxInfo.ready)
 	})
 
 	byteSlice := unsafe.Slice((*byte)(data), int(size))
@@ -138,9 +140,10 @@ func open(options *Options) (*Stream, error) {
 	macNextID++
 
 	ctxInfo := &macStreamContext{
-		id:  id,
-		vpw: vpw,
-		apw: apw,
+		id:    id,
+		vpw:   vpw,
+		apw:   apw,
+		ready: make(chan struct{}),
 	}
 	macStreams[id] = ctxInfo
 	macStreamsMu.Unlock()
@@ -162,6 +165,9 @@ func open(options *Options) (*Stream, error) {
 	ctxInfo.ctx = ctx
 	C.StartMacCapture(ctx)
 
+	// Block until the first frame is captured so that the width/height are populated.
+	<-ctxInfo.ready
+
 	reader := &darwinReadCloser{
 		id:  id,
 		vpr: vpr,
@@ -181,8 +187,8 @@ func open(options *Options) (*Stream, error) {
 	return &Stream{
 		ReadCloser:  reader,
 		Audio:       audioReader,
-		Width:       0, // Width/height available after first frame in ctxInfo
-		Height:      0,
+		Width:       ctxInfo.width, // Set asynchronously by callback
+		Height:      ctxInfo.height,
 		FrameRate:   60,
 		PixelFormat: PixelFormatBGRA,
 	}, nil

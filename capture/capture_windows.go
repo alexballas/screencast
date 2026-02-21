@@ -33,6 +33,7 @@ type winStreamContext struct {
 	id         int
 	width      uint32
 	height     uint32
+	ready      chan struct{}
 	widthOnce  sync.Once
 	heightOnce sync.Once
 }
@@ -96,6 +97,7 @@ func winVideoCallbackGo(id C.int, data unsafe.Pointer, size C.uint32_t, width C.
 	})
 	ctxInfo.heightOnce.Do(func() {
 		ctxInfo.height = uint32(height)
+		close(ctxInfo.ready)
 	})
 
 	byteSlice := unsafe.Slice((*byte)(data), int(size))
@@ -138,9 +140,10 @@ func open(options *Options) (*Stream, error) {
 	winNextID++
 
 	ctxInfo := &winStreamContext{
-		id:  id,
-		vpw: vpw,
-		apw: apw,
+		id:    id,
+		vpw:   vpw,
+		apw:   apw,
+		ready: make(chan struct{}),
 	}
 	winStreams[id] = ctxInfo
 	winStreamsMu.Unlock()
@@ -162,6 +165,9 @@ func open(options *Options) (*Stream, error) {
 	ctxInfo.ctx = ctx
 	C.StartWinCapture(ctx)
 
+	// Wait for the first frame to populate real width/height
+	<-ctxInfo.ready
+
 	reader := &windowsReadCloser{
 		id:  id,
 		vpr: vpr,
@@ -181,8 +187,8 @@ func open(options *Options) (*Stream, error) {
 	return &Stream{
 		ReadCloser:  reader,
 		Audio:       audioReader,
-		Width:       0, // Real width/height populated asynchronously
-		Height:      0,
+		Width:       ctxInfo.width,
+		Height:      ctxInfo.height,
 		FrameRate:   60,
 		PixelFormat: PixelFormatBGRA,
 	}, nil

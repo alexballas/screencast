@@ -33,10 +33,6 @@ func main() {
 	}
 
 	width, height := stream.Width, stream.Height
-	if width == 0 || height == 0 {
-		width, height = 1920, 1080
-		fmt.Printf("Warning: Initial resolution is 0x0. Defaulting to %dx%d for FFmpeg.\n", width, height)
-	}
 
 	frameRate := stream.FrameRate
 	if frameRate == 0 {

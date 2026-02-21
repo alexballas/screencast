@@ -77,12 +77,6 @@ func main() {
 	}
 
 	width, height := stream.Width, stream.Height
-	if width == 0 || height == 0 {
-		// On Windows and macOS, the resolution is populated asynchronously after the first frame.
-		// For this basic FFmpeg example, we fallback to a default if it's not immediately available.
-		width, height = 1920, 1080
-		fmt.Printf("Warning: Initial resolution is 0x0. Defaulting to %dx%d for FFmpeg.\n", width, height)
-	}
 
 	// Pipe the io.Reader directly into FFmpeg
 	cmd := exec.Command("ffmpeg",
