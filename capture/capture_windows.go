@@ -30,7 +30,6 @@ type winStreamContext struct {
 	ctx        unsafe.Pointer
 	vpw        *io.PipeWriter
 	apw        *io.PipeWriter
-	id         int
 	width      uint32
 	height     uint32
 	ready      chan struct{}
@@ -122,11 +121,10 @@ func winAudioCallbackGo(id C.int, data unsafe.Pointer, size C.uint32_t) {
 
 // Windows implementation target: Windows Graphics Capture (WinRT GraphicsCaptureItem).
 func open(options *Options) (*Stream, error) {
-	if options == nil {
-		options = &Options{}
-	}
-	if options.StreamIndex < 0 {
-		return nil, fmt.Errorf("%w: StreamIndex must be >= 0", ErrInvalidOptions)
+	var err error
+	options, err = validateOpenOptions(options)
+	if err != nil {
+		return nil, err
 	}
 
 	vpr, vpw := io.Pipe()
@@ -142,7 +140,6 @@ func open(options *Options) (*Stream, error) {
 	winNextID++
 
 	ctxInfo := &winStreamContext{
-		id:    id,
 		vpw:   vpw,
 		apw:   apw,
 		ready: make(chan struct{}),
@@ -180,9 +177,6 @@ func open(options *Options) (*Stream, error) {
 	ctxInfo.ctx = ctx
 	C.StartWinCapture(ctx)
 
-	// Wait for the first frame to populate real width/height
-	<-ctxInfo.ready
-
 	reader := &windowsReadCloser{
 		id:  id,
 		vpr: vpr,
@@ -191,17 +185,13 @@ func open(options *Options) (*Stream, error) {
 		apw: apw,
 	}
 
-	var audioReader io.ReadCloser
-	if apr != nil {
-		audioReader = struct {
-			io.Reader
-			io.Closer
-		}{apr, apr}
+	if err := waitForFirstFrame("windows", ctxInfo.ready, reader.Close); err != nil {
+		return nil, err
 	}
 
 	return &Stream{
 		ReadCloser:  reader,
-		Audio:       audioReader,
+		Audio:       pipeReaderAsReadCloser(apr),
 		Width:       ctxInfo.width,
 		Height:      ctxInfo.height,
 		FrameRate:   60,

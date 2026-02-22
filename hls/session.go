@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,6 +63,14 @@ func Start(options *Options) (*Session, error) {
 	opts, err := normalizeOptions(options)
 	if err != nil {
 		return nil, err
+	}
+	debugEnabled := envDebugEnabled()
+	if debugEnabled {
+		// Umbrella debug mode: emit ffmpeg stderr and print the full command.
+		if opts.LogOutput == nil {
+			opts.LogOutput = os.Stderr
+		}
+		opts.DebugCommand = true
 	}
 
 	cleanupOldTempDirs(opts.TempDirPrefix, 12*time.Hour)
@@ -128,6 +137,9 @@ func Start(options *Options) (*Session, error) {
 		"-s", fmt.Sprintf("%dx%d", stream.Width, stream.Height),
 		"-r", fpsArg,
 		"-i", "pipe:0",
+	}
+	if debugEnabled {
+		args = append([]string{"-loglevel", "debug"}, args...)
 	}
 	if audioEnabled {
 		args = append(args,
@@ -210,10 +222,15 @@ func Start(options *Options) (*Session, error) {
 		ffmpegDone: make(chan error, 1),
 		stderr:     stderrBuf,
 	}
+	runtime.SetFinalizer(s, func(sess *Session) {
+		_ = sess.Close()
+	})
 
 	go func(c *exec.Cmd, done chan error) {
 		done <- c.Wait()
 		close(done)
+		// Ensure resources are reclaimed even if caller forgets to Close after ffmpeg exits.
+		_ = s.Close()
 	}(cmd, s.ffmpegDone)
 
 	if err := waitForPlaylistReady(playlistPath, tempDir, opts.StartupTimeout, s.ffmpegDone, s.stderr); err != nil {
@@ -252,6 +269,8 @@ func (s *Session) Close() error {
 
 	var out error
 	s.closeOnce.Do(func() {
+		runtime.SetFinalizer(s, nil)
+
 		if s.cmd != nil && s.cmd.Process != nil {
 			err := s.cmd.Process.Kill()
 			if err != nil && !errors.Is(err, os.ErrProcessDone) {

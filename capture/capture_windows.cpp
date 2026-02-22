@@ -61,6 +61,8 @@ struct WinCaptureSession {
     winrt::com_ptr<IAudioClient> audioClient;
     winrt::com_ptr<IAudioCaptureClient> captureClient;
     HANDLE audioEvent{nullptr};
+    uint32_t audioBlockAlign{4};
+    std::vector<uint8_t> silenceBuffer;
 };
 
 struct FrameCallbackGuard {
@@ -155,7 +157,7 @@ static DWORD WINAPI AudioCaptureThreadProc(LPVOID param) {
         if (FAILED(hr)) break;
         
         while (packetLength != 0) {
-            BYTE* data;
+            BYTE* data = nullptr;
             UINT32 numFramesAvailable;
             DWORD flags;
             
@@ -163,10 +165,20 @@ static DWORD WINAPI AudioCaptureThreadProc(LPVOID param) {
             if (FAILED(hr)) break;
             
             if (sess->audioCallback && numFramesAvailable > 0) {
-                // Assuming 48kHz, 16-bit, stereo as per unified requirement. 
-                // Actual conversion might be needed if format differs, but we send raw for now.
-                // 1 frame = 2 channels * 2 bytes = 4 bytes.
-                sess->audioCallback(sess->goID, data, numFramesAvailable * 4);
+                const uint32_t bytes = numFramesAvailable * sess->audioBlockAlign;
+                BYTE* payload = data;
+                if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || payload == nullptr) {
+                    if (sess->silenceBuffer.size() < bytes) {
+                        sess->silenceBuffer.resize(bytes);
+                    }
+                    if (bytes != 0) {
+                        std::memset(sess->silenceBuffer.data(), 0, bytes);
+                        payload = sess->silenceBuffer.data();
+                    }
+                }
+                if (payload != nullptr && bytes > 0) {
+                    sess->audioCallback(sess->goID, payload, bytes);
+                }
             }
             
             hr = captureClient->ReleaseBuffer(numFramesAvailable);
@@ -322,6 +334,7 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
         waveFormat.nBlockAlign = (waveFormat.nChannels * waveFormat.wBitsPerSample) / 8;
         waveFormat.nAvgBytesPerSec = waveFormat.nSamplesPerSec * waveFormat.nBlockAlign;
         waveFormat.cbSize = 0;
+        sess->audioBlockAlign = waveFormat.nBlockAlign;
 
         REFERENCE_TIME hnsRequestedDuration = 0; // Let the engine choose in shared/event mode.
         DWORD audioFlags = AUDCLNT_STREAMFLAGS_LOOPBACK |

@@ -44,11 +44,10 @@ func (r *linuxReadCloser) Close() error {
 }
 
 func open(options *Options) (*Stream, error) {
-	if options == nil {
-		options = &Options{}
-	}
-	if options.StreamIndex < 0 {
-		return nil, fmt.Errorf("%w: StreamIndex must be >= 0", ErrInvalidOptions)
+	var err error
+	options, err = validateOpenOptions(options)
+	if err != nil {
+		return nil, err
 	}
 
 	if !pipewire.IsAvailable() {

@@ -13,9 +13,11 @@ extern void macAudioCallbackGo(int id, void* data, uint32_t size);
 */
 import "C"
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 	"unsafe"
 )
@@ -30,7 +32,6 @@ type macStreamContext struct {
 	ctx        unsafe.Pointer
 	vpw        *io.PipeWriter
 	apw        *io.PipeWriter
-	id         int
 	width      uint32
 	height     uint32
 	ready      chan struct{}
@@ -115,16 +116,19 @@ func macAudioCallbackGo(id C.int, data unsafe.Pointer, size C.uint32_t) {
 	}
 
 	byteSlice := unsafe.Slice((*byte)(data), int(size))
-	ctxInfo.apw.Write(byteSlice)
+	pcm := convertPlanarFloat32StereoToS16(byteSlice)
+	if len(pcm) == 0 {
+		return
+	}
+	_, _ = ctxInfo.apw.Write(pcm)
 }
 
 // macOS implementation target: ScreenCaptureKit (SCShareableContent + SCStream).
 func open(options *Options) (*Stream, error) {
-	if options == nil {
-		options = &Options{}
-	}
-	if options.StreamIndex < 0 {
-		return nil, fmt.Errorf("%w: StreamIndex must be >= 0", ErrInvalidOptions)
+	var err error
+	options, err = validateOpenOptions(options)
+	if err != nil {
+		return nil, err
 	}
 
 	vpr, vpw := io.Pipe()
@@ -140,7 +144,6 @@ func open(options *Options) (*Stream, error) {
 	macNextID++
 
 	ctxInfo := &macStreamContext{
-		id:    id,
 		vpw:   vpw,
 		apw:   apw,
 		ready: make(chan struct{}),
@@ -165,9 +168,6 @@ func open(options *Options) (*Stream, error) {
 	ctxInfo.ctx = ctx
 	C.StartMacCapture(ctx)
 
-	// Block until the first frame is captured so that the width/height are populated.
-	<-ctxInfo.ready
-
 	reader := &darwinReadCloser{
 		id:  id,
 		vpr: vpr,
@@ -176,20 +176,72 @@ func open(options *Options) (*Stream, error) {
 		apw: apw,
 	}
 
-	var audioReader io.ReadCloser
-	if options.IncludeAudio {
-		audioReader = struct {
-			io.Reader
-			io.Closer
-		}{apr, apr}
+	if err := waitForFirstFrame("macOS", ctxInfo.ready, reader.Close); err != nil {
+		return nil, err
 	}
 
 	return &Stream{
 		ReadCloser:  reader,
-		Audio:       audioReader,
+		Audio:       pipeReaderAsReadCloser(apr),
 		Width:       ctxInfo.width, // Set asynchronously by callback
 		Height:      ctxInfo.height,
 		FrameRate:   60,
 		PixelFormat: PixelFormatBGRA,
 	}, nil
+}
+
+func convertPlanarFloat32StereoToS16(planar []byte) []byte {
+	// ScreenCaptureKit audio is float32 planar; convert to packed s16le stereo.
+	if len(planar) < 8 {
+		return nil
+	}
+
+	frames := len(planar) / 8
+	if frames == 0 {
+		return nil
+	}
+
+	planeBytes := frames * 4
+	if planeBytes*2 > len(planar) {
+		return nil
+	}
+
+	left := planar[:planeBytes]
+	right := planar[planeBytes : planeBytes*2]
+	out := make([]byte, frames*4)
+
+	for i := 0; i < frames; i++ {
+		li := i * 4
+		l := math.Float32frombits(binary.LittleEndian.Uint32(left[li : li+4]))
+		r := math.Float32frombits(binary.LittleEndian.Uint32(right[li : li+4]))
+
+		l16 := float32ToPCM16(l)
+		r16 := float32ToPCM16(r)
+		oi := i * 4
+		binary.LittleEndian.PutUint16(out[oi:oi+2], uint16(l16))
+		binary.LittleEndian.PutUint16(out[oi+2:oi+4], uint16(r16))
+	}
+
+	return out
+}
+
+func float32ToPCM16(v float32) int16 {
+	if math.IsNaN(float64(v)) {
+		return 0
+	}
+	if v >= 1 {
+		return 32767
+	}
+	if v <= -1 {
+		return -32768
+	}
+
+	scaled := int32(math.Round(float64(v * 32767)))
+	if scaled > 32767 {
+		scaled = 32767
+	}
+	if scaled < -32768 {
+		scaled = -32768
+	}
+	return int16(scaled)
 }

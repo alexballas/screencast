@@ -10,6 +10,7 @@ Supports Linux (`xdg-desktop-portal` + PipeWire), macOS (ScreenCaptureKit), and 
 - **Unified `io.Reader` Interface:** Pipe raw `BGRA` frames directly into `ffmpeg` or any standard Go stream.
 - **Audio Capture:** Optional system audio capture (48kHz, 16-bit, stereo) on supported platforms.
 - **Graceful Fallback:** Dynamically loads the PipeWire C library at runtime (`dlopen`).
+- **Robust Lifecycle Handling:** Idempotent close paths, auto-cleanup when ffmpeg exits, and first-frame startup timeouts on desktop backends.
 
 ## Requirements
 
@@ -115,6 +116,39 @@ go run examples/capture/main.go
 - **macOS:** Implemented (ScreenCaptureKit)
 - **Windows:** Implemented (Windows Graphics Capture)
   - Limitation: requires Windows 10 version 1809 or newer.
+
+## End-to-End Debugging
+
+Set one environment variable to enable debug logging across capture, HLS, and ffmpeg paths:
+
+```bash
+SCREENCAST_DEBUG=1
+```
+
+Optional: write PipeWire debug logs to a file:
+
+```bash
+SCREENCAST_DEBUG=1 SCREENCAST_DEBUG_FILE=/tmp/screencast-debug.log
+```
+
+What `SCREENCAST_DEBUG=1` enables:
+
+- PipeWire internal stream debug logs (Linux backend).
+- ffmpeg command printing and ffmpeg stderr capture in `hls.Start`.
+- ffmpeg `-loglevel debug` in `hls.Start`.
+- HLS HTTP directory handler debug logs in `hls.NewDirectoryHandler`.
+
+Legacy variables still supported:
+
+- `SCREENCAST_PIPEWIRE_DEBUG=1`
+- `SCREENCAST_PIPEWIRE_DEBUG_FILE=/path/to/file`
+
+## HLS Session Notes
+
+- `hls.Session` cleanup is idempotent (`Close()` can be called multiple times safely).
+- If ffmpeg exits unexpectedly, session resources are now auto-cleaned.
+- Desktop backends use a first-frame timeout to avoid indefinite startup hangs.
+- For diagnostics after failure, use `Session.StderrTail(n)`.
 
 ## License
 

@@ -10,7 +10,6 @@
 @property (nonatomic, assign) AudioFrameCallback audioCallback;
 @property (nonatomic, strong) SCStream *stream;
 @property (nonatomic, strong) dispatch_queue_t queue;
-@property (nonatomic, assign) BOOL isRunning;
 @property (nonatomic, assign) BOOL includeAudio;
 @end
 
@@ -49,10 +48,12 @@
         config.height = targetDisplay.height;
         config.showsCursor = YES;
         config.pixelFormat = kCVPixelFormatType_32BGRA;
+        config.queueDepth = 8;
         
         if (@available(macOS 13.0, *)) {
             config.capturesAudio = includeAudio;
             if (includeAudio) {
+                config.excludesCurrentProcessAudio = YES;
                 config.sampleRate = 48000;
                 config.channelCount = 2;
             }
@@ -75,15 +76,13 @@
 
 - (void)start {
     [self.stream startCaptureWithCompletionHandler:^(NSError *error) {
-        if (!error) {
-            self.isRunning = YES;
-        }
+        (void)error;
     }];
 }
 
 - (void)stop {
     [self.stream stopCaptureWithCompletionHandler:^(NSError *error) {
-        self.isRunning = NO;
+        (void)error;
     }];
 }
 

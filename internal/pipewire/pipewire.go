@@ -86,6 +86,7 @@ extern void on_param_changed_go(int id, uint32_t framerate_num, uint32_t framera
 
 struct go_stream_data {
     int id;
+    int is_audio;
     struct pw_stream *stream;
     struct spa_hook stream_listener;
 };
@@ -119,64 +120,88 @@ static void on_param_changed_c(void *userdata, uint32_t id, const struct spa_pod
     on_param_changed_go(data->id, raw.framerate.num, raw.framerate.denom);
 }
 
-static void on_process_c(void *userdata) {
-    struct go_stream_data *data = userdata;
-    if (!data->stream) return;
-
-    // OBS-style: dequeue all pending buffers, keep only newest.
-    struct pw_buffer *latest = NULL;
-    while (true) {
-        struct pw_buffer *b = d_pw_stream_dequeue_buffer(data->stream);
-        if (b == NULL) {
-            break;
-        }
-        if (latest != NULL) {
-            d_pw_stream_queue_buffer(data->stream, latest);
-        }
-        latest = b;
-    }
-
-    if (latest == NULL) {
+static inline void process_single_buffer(struct go_stream_data *data, struct pw_buffer *pwbuf) {
+    if (data == NULL || pwbuf == NULL || data->stream == NULL) {
         return;
     }
 
-    struct spa_buffer *buf = latest->buffer;
+    struct spa_buffer *buf = pwbuf->buffer;
     if (buf == NULL || buf->n_datas == 0) {
-        d_pw_stream_queue_buffer(data->stream, latest);
+        d_pw_stream_queue_buffer(data->stream, pwbuf);
         return;
     }
 
     struct spa_data *d0 = &buf->datas[0];
     if (d0->data == NULL || d0->chunk == NULL) {
-        d_pw_stream_queue_buffer(data->stream, latest);
+        d_pw_stream_queue_buffer(data->stream, pwbuf);
         return;
     }
 
     struct spa_meta_header *header = spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof(*header));
     if (header != NULL && (header->flags & SPA_META_HEADER_FLAG_CORRUPTED) > 0) {
-        d_pw_stream_queue_buffer(data->stream, latest);
+        d_pw_stream_queue_buffer(data->stream, pwbuf);
         return;
     }
     if ((d0->chunk->flags & SPA_CHUNK_FLAG_CORRUPTED) > 0) {
-        d_pw_stream_queue_buffer(data->stream, latest);
+        d_pw_stream_queue_buffer(data->stream, pwbuf);
         return;
     }
 
     uint32_t size = d0->chunk->size;
     uint32_t offset = d0->chunk->offset;
     if (size == 0 || offset >= d0->maxsize) {
-        d_pw_stream_queue_buffer(data->stream, latest);
+        d_pw_stream_queue_buffer(data->stream, pwbuf);
         return;
     }
     if (size > d0->maxsize - offset) {
-        d_pw_stream_queue_buffer(data->stream, latest);
+        d_pw_stream_queue_buffer(data->stream, pwbuf);
         return;
     }
 
     uint8_t *frame = SPA_PTROFF(d0->data, offset, uint8_t);
     on_frame_go(data->id, frame, size);
 
-    d_pw_stream_queue_buffer(data->stream, latest);
+    d_pw_stream_queue_buffer(data->stream, pwbuf);
+}
+
+static inline void on_process_video(struct go_stream_data *data) {
+    if (data == NULL || data->stream == NULL) return;
+
+    // Video follows OBS-style behavior: consume latest frame to stay live.
+    struct pw_buffer *latest = NULL;
+    while (true) {
+        struct pw_buffer *b = d_pw_stream_dequeue_buffer(data->stream);
+        if (b == NULL) break;
+        if (latest != NULL) {
+            d_pw_stream_queue_buffer(data->stream, latest);
+        }
+        latest = b;
+    }
+    if (latest == NULL) return;
+
+    process_single_buffer(data, latest);
+}
+
+static inline void on_process_audio(struct go_stream_data *data) {
+    if (data == NULL || data->stream == NULL) return;
+
+    // Audio must preserve packet order to keep continuity.
+    while (true) {
+        struct pw_buffer *b = d_pw_stream_dequeue_buffer(data->stream);
+        if (b == NULL) break;
+        process_single_buffer(data, b);
+    }
+}
+
+static void on_process_c(void *userdata) {
+    struct go_stream_data *data = userdata;
+    if (data == NULL) return;
+
+    if (data->is_audio) {
+        on_process_audio(data);
+    } else {
+        on_process_video(data);
+    }
 }
 
 static const struct pw_stream_events stream_events = {
@@ -357,13 +382,18 @@ var (
 
 func initDebug() {
 	debugInitOnce.Do(func() {
-		debugEnabled = os.Getenv("SCREENCAST_PIPEWIRE_DEBUG") == "1"
+		debugEnabled = os.Getenv("SCREENCAST_PIPEWIRE_DEBUG") == "1" ||
+			os.Getenv("SCREENCAST_DEBUG") == "1"
 		if !debugEnabled {
 			return
 		}
 
 		out := io.Writer(os.Stderr)
-		if p := os.Getenv("SCREENCAST_PIPEWIRE_DEBUG_FILE"); p != "" {
+		p := os.Getenv("SCREENCAST_PIPEWIRE_DEBUG_FILE")
+		if p == "" {
+			p = os.Getenv("SCREENCAST_DEBUG_FILE")
+		}
+		if p != "" {
 			f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 			if err == nil {
 				out = f
@@ -456,6 +486,7 @@ func NewStream(fd int, nodeID uint32, width, height uint32) (*Stream, error) {
 
 	s.cData = (*C.struct_go_stream_data)(C.malloc(C.sizeof_struct_go_stream_data))
 	s.cData.id = C.int(s.id)
+	s.cData.is_audio = C.int(0)
 	s.cData.stream = nil
 
 	stream := C.create_stream(s.core, name, s.cData)
@@ -774,6 +805,7 @@ func NewAudioStream() (*Stream, error) {
 
 	s.cData = (*C.struct_go_stream_data)(C.malloc(C.sizeof_struct_go_stream_data))
 	s.cData.id = C.int(s.id)
+	s.cData.is_audio = C.int(1)
 	s.cData.stream = nil
 
 	stream := C.create_audio_stream(s.core, name, s.cData)
