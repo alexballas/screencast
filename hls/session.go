@@ -21,7 +21,7 @@ import (
 
 const (
 	defaultDeleteThreshold = 36
-	defaultStartupTimeout  = 40 * time.Second
+	defaultStartupTimeout  = 60 * time.Second
 	defaultTempDirPrefix   = "screencast-hls-"
 	defaultMaxFrameRate    = 60
 	defaultHighResCapFPS   = 30
@@ -29,7 +29,7 @@ const (
 	defaultAudioQueueSize  = 8192
 	defaultAudioChunkSize  = 4096
 	defaultAudioRelayQueue = 384
-	defaultHLSTimeSeconds  = 2
+	defaultHLSTimeSeconds  = 1
 	defaultHLSListSize     = 24
 )
 
@@ -160,6 +160,8 @@ func Start(options *Options) (*Session, error) {
 	if audioEnabled {
 		args = append(args,
 			"-thread_queue_size", strconv.Itoa(opts.AudioQueueSize),
+			"-probesize", "32",
+			"-analyzeduration", "0",
 			"-f", "s16le",
 			"-ar", "48000",
 			"-ac", "2",
