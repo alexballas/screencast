@@ -22,6 +22,8 @@ extern "C" HRESULT __stdcall CreateDirect3D11SurfaceFromDXGISurface(IUnknown *dx
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <atomic>
+#include <cstring>
+#include <mutex>
 #include <vector>
 
 using namespace winrt;
@@ -40,6 +42,7 @@ struct WinCaptureSession {
     bool includeAudio;
     
     std::atomic<bool> isRunning{false};
+    std::atomic<bool> shuttingDown{false};
     HANDLE audioThread{nullptr};
     
     winrt::com_ptr<ID3D11Device> d3dDevice;
@@ -48,12 +51,57 @@ struct WinCaptureSession {
     GraphicsCaptureItem item{nullptr};
     Direct3D11CaptureFramePool framePool{nullptr};
     GraphicsCaptureSession session{nullptr};
+    std::atomic<uint32_t> frameCallbacksInFlight{0};
+    HANDLE frameCallbacksDrained{nullptr};
+    winrt::event_token frameArrivedToken{};
+    bool frameArrivedTokenRegistered{false};
+    std::mutex d3dMutex;
     
     // Audio
     winrt::com_ptr<IAudioClient> audioClient;
     winrt::com_ptr<IAudioCaptureClient> captureClient;
     HANDLE audioEvent{nullptr};
 };
+
+struct FrameCallbackGuard {
+    explicit FrameCallbackGuard(WinCaptureSession* s) : sess(s) {
+        if (!sess) return;
+        sess->frameCallbacksInFlight.fetch_add(1, std::memory_order_acq_rel);
+        if (sess->frameCallbacksDrained != nullptr) {
+            ResetEvent(sess->frameCallbacksDrained);
+        }
+    }
+
+    ~FrameCallbackGuard() {
+        if (!sess) return;
+        const uint32_t remaining = sess->frameCallbacksInFlight.fetch_sub(1, std::memory_order_acq_rel) - 1;
+        if (remaining == 0 && sess->frameCallbacksDrained != nullptr) {
+            SetEvent(sess->frameCallbacksDrained);
+        }
+    }
+
+    WinCaptureSession* sess;
+};
+
+static void DestroyWinCaptureSession(WinCaptureSession* sess) {
+    if (!sess) return;
+
+    if (sess->audioThread != nullptr) {
+        WaitForSingleObject(sess->audioThread, 2000);
+        CloseHandle(sess->audioThread);
+        sess->audioThread = nullptr;
+    }
+    if (sess->audioEvent != nullptr) {
+        CloseHandle(sess->audioEvent);
+        sess->audioEvent = nullptr;
+    }
+    if (sess->frameCallbacksDrained != nullptr) {
+        CloseHandle(sess->frameCallbacksDrained);
+        sess->frameCallbacksDrained = nullptr;
+    }
+
+    delete sess;
+}
 
 static inline auto CreateD3DDevice() {
     winrt::com_ptr<ID3D11Device> d3dDevice;
@@ -136,6 +184,11 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     
     WinCaptureSession* sess = new WinCaptureSession();
+    sess->frameCallbacksDrained = CreateEvent(nullptr, TRUE, TRUE, nullptr);
+    if (sess->frameCallbacksDrained == nullptr) {
+        DestroyWinCaptureSession(sess);
+        return nullptr;
+    }
     sess->goID = id;
     sess->videoCallback = vcb;
     sess->audioCallback = acb;
@@ -146,7 +199,7 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
     
     if (monitors.empty() || streamIndex >= monitors.size() || streamIndex < 0) {
         if (streamIndex != 0) {
-            delete sess;
+            DestroyWinCaptureSession(sess);
             return nullptr;
         }
     }
@@ -158,7 +211,7 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
     winrt::com_ptr<::IInspectable> itemInterop;
     HRESULT hr = factory->CreateForMonitor(targetMonitor, winrt::guid_of<ABI::Windows::Graphics::Capture::IGraphicsCaptureItem>(), itemInterop.put_void());
     if (FAILED(hr)) {
-        delete sess;
+        DestroyWinCaptureSession(sess);
         return nullptr;
     }
     
@@ -175,9 +228,13 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
         
     sess->session = sess->framePool.CreateCaptureSession(sess->item);
     
-    sess->framePool.FrameArrived([sess](auto const& pool, auto const&) {
+    sess->frameArrivedToken = sess->framePool.FrameArrived([sess](auto const& pool, auto const&) {
+        if (sess->shuttingDown.load(std::memory_order_acquire)) return;
+        FrameCallbackGuard guard(sess);
+        if (sess->shuttingDown.load(std::memory_order_acquire)) return;
+
         auto frame = pool.TryGetNextFrame();
-        if (!frame) return;
+        if (!frame || sess->shuttingDown.load(std::memory_order_acquire)) return;
         
         winrt::com_ptr<ID3D11Texture2D> surfaceTexture;
         auto surfaceUnknown = frame.Surface().template as<::IUnknown>();
@@ -186,49 +243,74 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
         if (FAILED(surfaceUnknown->QueryInterface(kDirect3DDxgiInterfaceAccessIID, surfaceInterop.put_void()))) {
             return;
         }
-        surfaceInterop->GetInterface(winrt::guid_of<ID3D11Texture2D>(), surfaceTexture.put_void());
-        
-        D3D11_TEXTURE2D_DESC desc;
-        surfaceTexture->GetDesc(&desc);
-        
-        // Create staging texture
-        desc.Usage = D3D11_USAGE_STAGING;
-        desc.BindFlags = 0;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        desc.MiscFlags = 0;
-        
-        winrt::com_ptr<ID3D11Texture2D> stagingTexture;
-        sess->d3dDevice->CreateTexture2D(&desc, nullptr, stagingTexture.put());
-        
-        sess->d3dContext->CopyResource(stagingTexture.get(), surfaceTexture.get());
-        
-        D3D11_MAPPED_SUBRESOURCE mapped;
-        if (SUCCEEDED(sess->d3dContext->Map(stagingTexture.get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-            if (sess->videoCallback) {
-                sess->videoCallback(sess->goID, mapped.pData, mapped.RowPitch * desc.Height, desc.Width, desc.Height);
+        if (FAILED(surfaceInterop->GetInterface(winrt::guid_of<ID3D11Texture2D>(), surfaceTexture.put_void())) || !surfaceTexture) {
+            return;
+        }
+
+        std::vector<uint8_t> frameCopy;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        {
+            std::lock_guard<std::mutex> lock(sess->d3dMutex);
+            if (!sess->d3dDevice || !sess->d3dContext) return;
+
+            D3D11_TEXTURE2D_DESC desc = {};
+            surfaceTexture->GetDesc(&desc);
+            
+            // Copy to a CPU-readable staging texture.
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            desc.MiscFlags = 0;
+            
+            winrt::com_ptr<ID3D11Texture2D> stagingTexture;
+            HRESULT hrLocal = sess->d3dDevice->CreateTexture2D(&desc, nullptr, stagingTexture.put());
+            if (FAILED(hrLocal) || !stagingTexture) {
+                return;
+            }
+
+            sess->d3dContext->CopyResource(stagingTexture.get(), surfaceTexture.get());
+
+            D3D11_MAPPED_SUBRESOURCE mapped = {};
+            hrLocal = sess->d3dContext->Map(stagingTexture.get(), 0, D3D11_MAP_READ, 0, &mapped);
+            if (FAILED(hrLocal) || mapped.pData == nullptr) {
+                return;
+            }
+
+            const uint32_t frameBytes = mapped.RowPitch * desc.Height;
+            if (frameBytes != 0) {
+                frameCopy.resize(frameBytes);
+                std::memcpy(frameCopy.data(), mapped.pData, frameBytes);
+                width = desc.Width;
+                height = desc.Height;
             }
             sess->d3dContext->Unmap(stagingTexture.get(), 0);
         }
+
+        if (sess->videoCallback && !frameCopy.empty()) {
+            sess->videoCallback(sess->goID, frameCopy.data(), static_cast<uint32_t>(frameCopy.size()), width, height);
+        }
     });
+    sess->frameArrivedTokenRegistered = true;
 
     if (includeAudio) {
         winrt::com_ptr<IMMDeviceEnumerator> enumerator;
         hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), enumerator.put_void());
         if (FAILED(hr) || !enumerator) {
-            delete sess;
+            DestroyWinCaptureSession(sess);
             return nullptr;
         }
         
         winrt::com_ptr<IMMDevice> renderDevice;
         hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, renderDevice.put());
         if (FAILED(hr) || !renderDevice) {
-            delete sess;
+            DestroyWinCaptureSession(sess);
             return nullptr;
         }
         
         hr = renderDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, sess->audioClient.put_void());
         if (FAILED(hr) || !sess->audioClient) {
-            delete sess;
+            DestroyWinCaptureSession(sess);
             return nullptr;
         }
         
@@ -248,13 +330,13 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
                            AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
         hr = sess->audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, audioFlags, hnsRequestedDuration, 0, &waveFormat, nullptr);
         if (FAILED(hr)) {
-            delete sess;
+            DestroyWinCaptureSession(sess);
             return nullptr;
         }
         
         sess->audioEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         if (sess->audioEvent == nullptr) {
-            delete sess;
+            DestroyWinCaptureSession(sess);
             return nullptr;
         }
 
@@ -262,7 +344,7 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
         if (FAILED(hr)) {
             CloseHandle(sess->audioEvent);
             sess->audioEvent = nullptr;
-            delete sess;
+            DestroyWinCaptureSession(sess);
             return nullptr;
         }
 
@@ -270,7 +352,7 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
         if (FAILED(hr) || !sess->captureClient) {
             CloseHandle(sess->audioEvent);
             sess->audioEvent = nullptr;
-            delete sess;
+            DestroyWinCaptureSession(sess);
             return nullptr;
         }
     }
@@ -281,8 +363,11 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
 void StartWinCapture(void* ctx) {
     if (!ctx) return;
     WinCaptureSession* sess = static_cast<WinCaptureSession*>(ctx);
+    sess->shuttingDown = false;
     sess->isRunning = true;
-    sess->session.StartCapture();
+    if (sess->session) {
+        sess->session.StartCapture();
+    }
     if (sess->includeAudio && sess->audioClient && sess->captureClient && sess->audioEvent != nullptr) {
         HRESULT hr = sess->audioClient->Start();
         if (FAILED(hr)) {
@@ -299,8 +384,21 @@ void StopWinCapture(void* ctx) {
     if (!ctx) return;
     WinCaptureSession* sess = static_cast<WinCaptureSession*>(ctx);
     sess->isRunning = false;
-    sess->session.Close();
-    sess->framePool.Close();
+    sess->shuttingDown = true;
+    if (sess->framePool && sess->frameArrivedTokenRegistered) {
+        sess->framePool.FrameArrived(sess->frameArrivedToken);
+        sess->frameArrivedTokenRegistered = false;
+    }
+    if (sess->frameCallbacksDrained != nullptr &&
+        sess->frameCallbacksInFlight.load(std::memory_order_acquire) > 0) {
+        WaitForSingleObject(sess->frameCallbacksDrained, INFINITE);
+    }
+    if (sess->session) {
+        sess->session.Close();
+    }
+    if (sess->framePool) {
+        sess->framePool.Close();
+    }
     if (sess->includeAudio) {
         if (sess->audioClient) {
             sess->audioClient->Stop();
@@ -323,5 +421,5 @@ void StopWinCapture(void* ctx) {
 void FreeWinCapture(void* ctx) {
     if (!ctx) return;
     WinCaptureSession* sess = static_cast<WinCaptureSession*>(ctx);
-    delete sess;
+    DestroyWinCaptureSession(sess);
 }

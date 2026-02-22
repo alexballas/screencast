@@ -62,17 +62,19 @@ func (r *windowsReadCloser) Close() error {
 		}
 		winStreamsMu.Unlock()
 
+		vErr := r.vpw.Close()
+		var aErr error
+		if r.apw != nil {
+			aErr = r.apw.Close()
+		}
+
 		if ok && ctxInfo.ctx != nil {
 			C.StopWinCapture(ctxInfo.ctx)
 			C.FreeWinCapture(ctxInfo.ctx)
 		}
 
-		vErr := r.vpw.Close()
 		r.vpr.Close()
-
-		var aErr error
-		if r.apw != nil {
-			aErr = r.apw.Close()
+		if r.apr != nil {
 			r.apr.Close()
 		}
 
