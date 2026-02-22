@@ -68,7 +68,7 @@ func Start(options *Options) (*Session, error) {
 	if debugEnabled {
 		// Umbrella debug mode: emit ffmpeg stderr and print the full command.
 		if opts.LogOutput == nil {
-			opts.LogOutput = os.Stderr
+			opts.LogOutput = envDebugOutput()
 		}
 		opts.DebugCommand = true
 	}
@@ -198,8 +198,11 @@ func Start(options *Options) (*Session, error) {
 		stderrWriter = io.MultiWriter(opts.LogOutput, stderrWriter)
 	}
 	if opts.DebugCommand {
-		stderrWriter = io.MultiWriter(stderrWriter, os.Stderr)
-		_, _ = fmt.Fprintf(os.Stderr, "screencast ffmpeg: %s %s\n", opts.FFmpegPath, strings.Join(args, " "))
+		out := opts.LogOutput
+		if out == nil {
+			out = os.Stderr
+		}
+		_, _ = fmt.Fprintf(out, "screencast ffmpeg: %s %s\n", opts.FFmpegPath, strings.Join(args, " "))
 	}
 
 	cmd := exec.Command(opts.FFmpegPath, args...)

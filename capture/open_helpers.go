@@ -19,10 +19,15 @@ func validateOpenOptions(options *Options) (*Options, error) {
 }
 
 func waitForFirstFrame(platform string, ready <-chan struct{}, onTimeout func() error) error {
+	start := time.Now()
+	captureDebugf("platform=%s waiting_first_frame timeout=%s", platform, defaultFirstFrameTimeout)
+
 	select {
 	case <-ready:
+		captureDebugf("platform=%s first_frame_ready elapsed=%s", platform, time.Since(start))
 		return nil
 	case <-time.After(defaultFirstFrameTimeout):
+		captureDebugf("platform=%s first_frame_timeout elapsed=%s", platform, time.Since(start))
 		if onTimeout != nil {
 			_ = onTimeout()
 		}

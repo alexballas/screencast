@@ -2,7 +2,6 @@ package hls
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"path"
@@ -42,7 +41,7 @@ func NewDirectoryHandler(dir string, options *DirectoryHandlerOptions) http.Hand
 	if envDebugEnabled() {
 		opts.Debug = true
 		if opts.Logf == nil {
-			opts.Logf = log.Printf
+			opts.Logf = envDebugPrintf
 		}
 		if opts.LogPrefix == "" {
 			opts.LogPrefix = "screencast/hls"

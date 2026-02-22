@@ -31,6 +31,7 @@ func (r *linuxReadCloser) Read(p []byte) (int, error) {
 
 func (r *linuxReadCloser) Close() error {
 	r.once.Do(func() {
+		captureDebugf("platform=linux close_begin")
 		streamErr := r.stream.Close()
 		var audioErr error
 		if r.audio != nil {
@@ -38,6 +39,7 @@ func (r *linuxReadCloser) Close() error {
 		}
 		sessErr := r.sess.Close()
 		r.err = errors.Join(streamErr, audioErr, sessErr)
+		captureDebugf("platform=linux close_done err=%v", r.err)
 	})
 
 	return r.err
@@ -49,16 +51,20 @@ func open(options *Options) (*Stream, error) {
 	if err != nil {
 		return nil, err
 	}
+	captureDebugf("platform=linux open_start stream_index=%d include_audio=%t", options.StreamIndex, options.IncludeAudio)
 
 	if !pipewire.IsAvailable() {
+		captureDebugf("platform=linux open_failed reason=pipewire_not_loaded")
 		return nil, pipewire.ErrLibraryNotLoaded
 	}
 
 	sess, err := screencast.CreateSession(nil)
 	if err != nil {
+		captureDebugf("platform=linux create_session_failed err=%v", err)
 		return nil, err
 	}
 	if sess == nil {
+		captureDebugf("platform=linux open_cancelled stage=create_session")
 		return nil, ErrCancelled
 	}
 
@@ -76,36 +82,44 @@ func open(options *Options) (*Stream, error) {
 		Multiple:   true,
 	})
 	if err != nil {
+		captureDebugf("platform=linux select_sources_failed err=%v", err)
 		return nil, err
 	}
 
 	streams, err := sess.Start("", nil)
 	if err != nil {
+		captureDebugf("platform=linux start_failed err=%v", err)
 		return nil, err
 	}
 	if streams == nil {
+		captureDebugf("platform=linux open_cancelled stage=start")
 		return nil, ErrCancelled
 	}
 	if len(streams) == 0 {
+		captureDebugf("platform=linux open_failed reason=no_streams")
 		return nil, ErrNoStreams
 	}
 	if options.StreamIndex >= len(streams) {
+		captureDebugf("platform=linux open_failed reason=stream_index_out_of_range stream_index=%d streams=%d", options.StreamIndex, len(streams))
 		return nil, fmt.Errorf("%w: StreamIndex %d out of range (streams=%d)", ErrInvalidOptions, options.StreamIndex, len(streams))
 	}
 
 	selected := streams[options.StreamIndex]
 	if selected.Size[0] <= 0 || selected.Size[1] <= 0 {
+		captureDebugf("platform=linux open_failed reason=invalid_stream_size width=%d height=%d", selected.Size[0], selected.Size[1])
 		return nil, fmt.Errorf("invalid stream size %dx%d", selected.Size[0], selected.Size[1])
 	}
 
 	fd, err := sess.OpenPipeWireRemote(nil)
 	if err != nil {
+		captureDebugf("platform=linux open_pipewire_remote_failed err=%v", err)
 		return nil, err
 	}
 	defer syscall.Close(fd)
 
 	pwStream, err := pipewire.NewStream(fd, selected.NodeID, uint32(selected.Size[0]), uint32(selected.Size[1]))
 	if err != nil {
+		captureDebugf("platform=linux pipewire_new_video_stream_failed err=%v", err)
 		return nil, err
 	}
 	pwStream.Start()
@@ -113,6 +127,13 @@ func open(options *Options) (*Stream, error) {
 	if frameRate == 0 {
 		frameRate = defaultLinuxFrameRate
 	}
+	captureDebugf(
+		"platform=linux video_ready node_id=%d width=%d height=%d fps=%d",
+		selected.NodeID,
+		selected.Size[0],
+		selected.Size[1],
+		frameRate,
+	)
 
 	var (
 		audioReader io.ReadCloser
@@ -121,11 +142,13 @@ func open(options *Options) (*Stream, error) {
 	if options.IncludeAudio {
 		audioStream, err = pipewire.NewAudioStream()
 		if err != nil {
+			captureDebugf("platform=linux pipewire_new_audio_stream_failed err=%v", err)
 			pwStream.Close()
 			return nil, err
 		}
 		audioStream.Start()
 		audioReader = audioStream
+		captureDebugf("platform=linux audio_ready")
 	}
 
 	reader := &linuxReadCloser{
@@ -135,6 +158,13 @@ func open(options *Options) (*Stream, error) {
 	}
 
 	cleanupSession = false
+	captureDebugf(
+		"platform=linux open_ready width=%d height=%d fps=%d include_audio=%t",
+		selected.Size[0],
+		selected.Size[1],
+		frameRate,
+		options.IncludeAudio,
+	)
 	return &Stream{
 		ReadCloser:  reader,
 		Audio:       audioReader,

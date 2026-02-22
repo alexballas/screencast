@@ -19,6 +19,8 @@ import (
 	"io"
 	"math"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unsafe"
 )
 
@@ -37,6 +39,10 @@ type macStreamContext struct {
 	ready      chan struct{}
 	widthOnce  sync.Once
 	heightOnce sync.Once
+	videoOnce  sync.Once
+	audioOnce  sync.Once
+	lastVSlow  atomic.Int64
+	lastASlow  atomic.Int64
 }
 
 type darwinReadCloser struct {
@@ -56,6 +62,7 @@ func (r *darwinReadCloser) Read(p []byte) (int, error) {
 
 func (r *darwinReadCloser) Close() error {
 	r.closeOnce.Do(func() {
+		captureDebugf("platform=macOS stream=%d close_begin", r.id)
 		macStreamsMu.Lock()
 		ctxInfo, ok := macStreams[r.id]
 		if ok {
@@ -78,6 +85,7 @@ func (r *darwinReadCloser) Close() error {
 		}
 
 		r.err = errors.Join(vErr, aErr)
+		captureDebugf("platform=macOS stream=%d close_done err=%v", r.id, r.err)
 	})
 
 	return r.err
@@ -100,9 +108,21 @@ func macVideoCallbackGo(id C.int, data unsafe.Pointer, size C.uint32_t, width C.
 		ctxInfo.height = uint32(height)
 		close(ctxInfo.ready)
 	})
+	ctxInfo.videoOnce.Do(func() {
+		captureDebugf("platform=macOS stream=%d first_video_frame bytes=%d width=%d height=%d", int(id), int(size), int(width), int(height))
+	})
 
 	byteSlice := unsafe.Slice((*byte)(data), int(size))
-	ctxInfo.vpw.Write(byteSlice)
+	start := time.Now()
+	_, err := ctxInfo.vpw.Write(byteSlice)
+	if err != nil {
+		captureDebugf("platform=macOS stream=%d video_write_err=%v", int(id), err)
+		return
+	}
+	d := time.Since(start)
+	if d > 50*time.Millisecond && captureShouldLogSlowWrite(&ctxInfo.lastVSlow, time.Second) {
+		captureDebugf("platform=macOS stream=%d slow_video_write duration=%s bytes=%d", int(id), d, int(size))
+	}
 }
 
 //export macAudioCallbackGo
@@ -120,7 +140,19 @@ func macAudioCallbackGo(id C.int, data unsafe.Pointer, size C.uint32_t) {
 	if len(pcm) == 0 {
 		return
 	}
-	_, _ = ctxInfo.apw.Write(pcm)
+	ctxInfo.audioOnce.Do(func() {
+		captureDebugf("platform=macOS stream=%d first_audio_chunk in_bytes=%d out_bytes=%d", int(id), int(size), len(pcm))
+	})
+	start := time.Now()
+	_, err := ctxInfo.apw.Write(pcm)
+	if err != nil {
+		captureDebugf("platform=macOS stream=%d audio_write_err=%v", int(id), err)
+		return
+	}
+	d := time.Since(start)
+	if d > 50*time.Millisecond && captureShouldLogSlowWrite(&ctxInfo.lastASlow, time.Second) {
+		captureDebugf("platform=macOS stream=%d slow_audio_write duration=%s bytes=%d", int(id), d, len(pcm))
+	}
 }
 
 // macOS implementation target: ScreenCaptureKit (SCShareableContent + SCStream).
@@ -130,6 +162,7 @@ func open(options *Options) (*Stream, error) {
 	if err != nil {
 		return nil, err
 	}
+	captureDebugf("platform=macOS open_start stream_index=%d include_audio=%t", options.StreamIndex, options.IncludeAudio)
 
 	vpr, vpw := io.Pipe()
 	var apr *io.PipeReader
@@ -162,11 +195,13 @@ func open(options *Options) (*Stream, error) {
 		macStreamsMu.Lock()
 		delete(macStreams, id)
 		macStreamsMu.Unlock()
+		captureDebugf("platform=macOS stream=%d init_failed stream_index=%d include_audio=%t", id, options.StreamIndex, options.IncludeAudio)
 		return nil, fmt.Errorf("failed to initialize Mac ScreenCaptureKit session")
 	}
 
 	ctxInfo.ctx = ctx
 	C.StartMacCapture(ctx)
+	captureDebugf("platform=macOS stream=%d capture_started", id)
 
 	reader := &darwinReadCloser{
 		id:  id,
@@ -177,8 +212,17 @@ func open(options *Options) (*Stream, error) {
 	}
 
 	if err := waitForFirstFrame("macOS", ctxInfo.ready, reader.Close); err != nil {
+		captureDebugf("platform=macOS stream=%d open_failed err=%v", id, err)
 		return nil, err
 	}
+	captureDebugf(
+		"platform=macOS stream=%d open_ready width=%d height=%d fps=%d include_audio=%t",
+		id,
+		ctxInfo.width,
+		ctxInfo.height,
+		60,
+		apr != nil,
+	)
 
 	return &Stream{
 		ReadCloser:  reader,

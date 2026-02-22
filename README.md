@@ -125,7 +125,7 @@ Set one environment variable to enable debug logging across capture, HLS, and ff
 SCREENCAST_DEBUG=1
 ```
 
-Optional: write PipeWire debug logs to a file:
+Optional: write debug logs to a file (recommended for GUI apps on Windows/macOS):
 
 ```bash
 SCREENCAST_DEBUG=1 SCREENCAST_DEBUG_FILE=/tmp/screencast-debug.log
@@ -133,13 +133,23 @@ SCREENCAST_DEBUG=1 SCREENCAST_DEBUG_FILE=/tmp/screencast-debug.log
 
 What `SCREENCAST_DEBUG=1` enables:
 
+- Capture lifecycle logs on all platforms (Linux/macOS/Windows), including first-frame timing.
+- Slow write diagnostics in Windows/macOS capture callbacks (helps identify buffering/backpressure).
 - PipeWire internal stream debug logs (Linux backend).
 - ffmpeg command printing and ffmpeg stderr capture in `hls.Start`.
 - ffmpeg `-loglevel debug` in `hls.Start`.
 - HLS HTTP directory handler debug logs in `hls.NewDirectoryHandler`.
 
+What `SCREENCAST_DEBUG_FILE=/path/to/log` does:
+
+- Routes capture debug logs to the file on all platforms (Linux/macOS/Windows).
+- Routes HLS debug logs to the file on all platforms (Linux/macOS/Windows).
+- Routes PipeWire debug logs to the same file on Linux.
+
 Legacy variables still supported:
 
+- `SCREENCAST_CAPTURE_DEBUG=1`
+- `SCREENCAST_CAPTURE_DEBUG_FILE=/path/to/file`
 - `SCREENCAST_PIPEWIRE_DEBUG=1`
 - `SCREENCAST_PIPEWIRE_DEBUG_FILE=/path/to/file`
 
