@@ -90,12 +90,20 @@ static DWORD WINAPI AudioCaptureThreadProc(LPVOID param) {
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) return 1;
 
+    auto captureClient = sess->captureClient;
+    HANDLE audioEvent = sess->audioEvent;
+    if (!captureClient || audioEvent == nullptr) {
+        CoUninitialize();
+        return 1;
+    }
+
     UINT32 packetLength = 0;
-    while (sess->isRunning) {
-        DWORD waitResult = WaitForSingleObject(sess->audioEvent, 1000);
+    while (sess->isRunning.load()) {
+        DWORD waitResult = WaitForSingleObject(audioEvent, 1000);
         if (waitResult != WAIT_OBJECT_0) continue;
+        if (!sess->isRunning.load()) break;
         
-        hr = sess->captureClient->GetNextPacketSize(&packetLength);
+        hr = captureClient->GetNextPacketSize(&packetLength);
         if (FAILED(hr)) break;
         
         while (packetLength != 0) {
@@ -103,7 +111,7 @@ static DWORD WINAPI AudioCaptureThreadProc(LPVOID param) {
             UINT32 numFramesAvailable;
             DWORD flags;
             
-            hr = sess->captureClient->GetBuffer(&data, &numFramesAvailable, &flags, nullptr, nullptr);
+            hr = captureClient->GetBuffer(&data, &numFramesAvailable, &flags, nullptr, nullptr);
             if (FAILED(hr)) break;
             
             if (sess->audioCallback && numFramesAvailable > 0) {
@@ -113,10 +121,10 @@ static DWORD WINAPI AudioCaptureThreadProc(LPVOID param) {
                 sess->audioCallback(sess->goID, data, numFramesAvailable * 4);
             }
             
-            hr = sess->captureClient->ReleaseBuffer(numFramesAvailable);
+            hr = captureClient->ReleaseBuffer(numFramesAvailable);
             if (FAILED(hr)) break;
             
-            hr = sess->captureClient->GetNextPacketSize(&packetLength);
+            hr = captureClient->GetNextPacketSize(&packetLength);
             if (FAILED(hr)) break;
         }
     }
@@ -205,15 +213,31 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
 
     if (includeAudio) {
         winrt::com_ptr<IMMDeviceEnumerator> enumerator;
-        CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), enumerator.put_void());
+        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), enumerator.put_void());
+        if (FAILED(hr) || !enumerator) {
+            delete sess;
+            return nullptr;
+        }
         
         winrt::com_ptr<IMMDevice> renderDevice;
-        enumerator->GetDefaultAudioEndpoint(eRender, eConsole, renderDevice.put());
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, renderDevice.put());
+        if (FAILED(hr) || !renderDevice) {
+            delete sess;
+            return nullptr;
+        }
         
-        renderDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, sess->audioClient.put_void());
+        hr = renderDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, sess->audioClient.put_void());
+        if (FAILED(hr) || !sess->audioClient) {
+            delete sess;
+            return nullptr;
+        }
         
         WAVEFORMATEX* waveFormat = nullptr;
-        sess->audioClient->GetMixFormat(&waveFormat);
+        hr = sess->audioClient->GetMixFormat(&waveFormat);
+        if (FAILED(hr) || waveFormat == nullptr) {
+            delete sess;
+            return nullptr;
+        }
         
         // Force 48kHz, 16-bit, stereo for standard output
         waveFormat->nSamplesPerSec = 48000;
@@ -223,11 +247,37 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
         waveFormat->nAvgBytesPerSec = waveFormat->nSamplesPerSec * waveFormat->nBlockAlign;
         
         REFERENCE_TIME hnsRequestedDuration = 10000000; // 1 second
-        sess->audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK, hnsRequestedDuration, 0, waveFormat, nullptr);
+        hr = sess->audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK, hnsRequestedDuration, 0, waveFormat, nullptr);
+        if (FAILED(hr)) {
+            CoTaskMemFree(waveFormat);
+            delete sess;
+            return nullptr;
+        }
         
         sess->audioEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-        sess->audioClient->SetEventHandle(sess->audioEvent);
-        sess->audioClient->GetService(__uuidof(IAudioCaptureClient), sess->captureClient.put_void());
+        if (sess->audioEvent == nullptr) {
+            CoTaskMemFree(waveFormat);
+            delete sess;
+            return nullptr;
+        }
+
+        hr = sess->audioClient->SetEventHandle(sess->audioEvent);
+        if (FAILED(hr)) {
+            CoTaskMemFree(waveFormat);
+            CloseHandle(sess->audioEvent);
+            sess->audioEvent = nullptr;
+            delete sess;
+            return nullptr;
+        }
+
+        hr = sess->audioClient->GetService(__uuidof(IAudioCaptureClient), sess->captureClient.put_void());
+        if (FAILED(hr) || !sess->captureClient) {
+            CoTaskMemFree(waveFormat);
+            CloseHandle(sess->audioEvent);
+            sess->audioEvent = nullptr;
+            delete sess;
+            return nullptr;
+        }
         
         CoTaskMemFree(waveFormat);
     }
@@ -240,8 +290,11 @@ void StartWinCapture(void* ctx) {
     WinCaptureSession* sess = static_cast<WinCaptureSession*>(ctx);
     sess->isRunning = true;
     sess->session.StartCapture();
-    if (sess->includeAudio) {
-        sess->audioClient->Start();
+    if (sess->includeAudio && sess->audioClient && sess->captureClient && sess->audioEvent != nullptr) {
+        HRESULT hr = sess->audioClient->Start();
+        if (FAILED(hr)) {
+            return;
+        }
         sess->audioThread = CreateThread(nullptr, 0, AudioCaptureThreadProc, sess, 0, nullptr);
         if (sess->audioThread == nullptr) {
             sess->audioClient->Stop();
@@ -256,14 +309,21 @@ void StopWinCapture(void* ctx) {
     sess->session.Close();
     sess->framePool.Close();
     if (sess->includeAudio) {
-        sess->audioClient->Stop();
-        SetEvent(sess->audioEvent);
+        if (sess->audioClient) {
+            sess->audioClient->Stop();
+        }
+        if (sess->audioEvent != nullptr) {
+            SetEvent(sess->audioEvent);
+        }
         if (sess->audioThread != nullptr) {
             WaitForSingleObject(sess->audioThread, INFINITE);
             CloseHandle(sess->audioThread);
             sess->audioThread = nullptr;
         }
-        CloseHandle(sess->audioEvent);
+        if (sess->audioEvent != nullptr) {
+            CloseHandle(sess->audioEvent);
+            sess->audioEvent = nullptr;
+        }
     }
 }
 
