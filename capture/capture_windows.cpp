@@ -232,38 +232,34 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
             return nullptr;
         }
         
-        WAVEFORMATEX* waveFormat = nullptr;
-        hr = sess->audioClient->GetMixFormat(&waveFormat);
-        if (FAILED(hr) || waveFormat == nullptr) {
-            delete sess;
-            return nullptr;
-        }
-        
-        // Force 48kHz, 16-bit, stereo for standard output
-        waveFormat->nSamplesPerSec = 48000;
-        waveFormat->wBitsPerSample = 16;
-        waveFormat->nChannels = 2;
-        waveFormat->nBlockAlign = (waveFormat->nChannels * waveFormat->wBitsPerSample) / 8;
-        waveFormat->nAvgBytesPerSec = waveFormat->nSamplesPerSec * waveFormat->nBlockAlign;
-        
-        REFERENCE_TIME hnsRequestedDuration = 10000000; // 1 second
-        hr = sess->audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK, hnsRequestedDuration, 0, waveFormat, nullptr);
+        WAVEFORMATEX waveFormat = {};
+        waveFormat.wFormatTag = WAVE_FORMAT_PCM;
+        waveFormat.nChannels = 2;
+        waveFormat.nSamplesPerSec = 48000;
+        waveFormat.wBitsPerSample = 16;
+        waveFormat.nBlockAlign = (waveFormat.nChannels * waveFormat.wBitsPerSample) / 8;
+        waveFormat.nAvgBytesPerSec = waveFormat.nSamplesPerSec * waveFormat.nBlockAlign;
+        waveFormat.cbSize = 0;
+
+        REFERENCE_TIME hnsRequestedDuration = 0; // Let the engine choose in shared/event mode.
+        DWORD audioFlags = AUDCLNT_STREAMFLAGS_LOOPBACK |
+                           AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
+                           AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+                           AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+        hr = sess->audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, audioFlags, hnsRequestedDuration, 0, &waveFormat, nullptr);
         if (FAILED(hr)) {
-            CoTaskMemFree(waveFormat);
             delete sess;
             return nullptr;
         }
         
         sess->audioEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         if (sess->audioEvent == nullptr) {
-            CoTaskMemFree(waveFormat);
             delete sess;
             return nullptr;
         }
 
         hr = sess->audioClient->SetEventHandle(sess->audioEvent);
         if (FAILED(hr)) {
-            CoTaskMemFree(waveFormat);
             CloseHandle(sess->audioEvent);
             sess->audioEvent = nullptr;
             delete sess;
@@ -272,14 +268,11 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
 
         hr = sess->audioClient->GetService(__uuidof(IAudioCaptureClient), sess->captureClient.put_void());
         if (FAILED(hr) || !sess->captureClient) {
-            CoTaskMemFree(waveFormat);
             CloseHandle(sess->audioEvent);
             sess->audioEvent = nullptr;
             delete sess;
             return nullptr;
         }
-        
-        CoTaskMemFree(waveFormat);
     }
     
     return sess;

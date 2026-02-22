@@ -155,6 +155,19 @@ func open(options *Options) (*Stream, error) {
 	}
 
 	ctx := C.InitWinCapture(C.int(id), C.int(options.StreamIndex), C.bool(options.IncludeAudio), vcb, acb)
+	if ctx == nil && options.IncludeAudio {
+		// If audio initialization fails, retry video-only to keep capture functional.
+		if apw != nil {
+			_ = apw.Close()
+			apw = nil
+			ctxInfo.apw = nil
+		}
+		if apr != nil {
+			_ = apr.Close()
+			apr = nil
+		}
+		ctx = C.InitWinCapture(C.int(id), C.int(options.StreamIndex), C.bool(false), vcb, nil)
+	}
 	if ctx == nil {
 		winStreamsMu.Lock()
 		delete(winStreams, id)
@@ -177,7 +190,7 @@ func open(options *Options) (*Stream, error) {
 	}
 
 	var audioReader io.ReadCloser
-	if options.IncludeAudio {
+	if apr != nil {
 		audioReader = struct {
 			io.Reader
 			io.Closer
