@@ -134,7 +134,7 @@ SCREENCAST_DEBUG=1 SCREENCAST_DEBUG_FILE=/tmp/screencast-debug.log
 What `SCREENCAST_DEBUG=1` enables:
 
 - Capture lifecycle logs on all platforms (Linux/macOS/Windows), including first-frame timing.
-- Slow write diagnostics in Windows/macOS capture callbacks (helps identify buffering/backpressure).
+- Windows/macOS async callback queue diagnostics, including slow pipe writes and dropped video frames under pressure.
 - PipeWire internal stream debug logs (Linux backend).
 - ffmpeg command printing and ffmpeg stderr capture in `hls.Start`.
 - ffmpeg `-loglevel debug` in `hls.Start`.
@@ -145,6 +145,7 @@ What `SCREENCAST_DEBUG_FILE=/path/to/log` does:
 - Routes capture debug logs to the file on all platforms (Linux/macOS/Windows).
 - Routes HLS debug logs to the file on all platforms (Linux/macOS/Windows).
 - Routes PipeWire debug logs to the same file on Linux.
+- If your app provides custom HLS log handlers/writers, debug output is still mirrored to this file.
 
 Legacy variables still supported:
 
@@ -157,6 +158,8 @@ Legacy variables still supported:
 
 - `hls.Session` cleanup is idempotent (`Close()` can be called multiple times safely).
 - If ffmpeg exits unexpectedly, session resources are now auto-cleaned.
+- When audio is requested but platform capture audio is unavailable, HLS injects paced synthetic silence so the audio track remains present.
+- Default startup timeout is 40s to reduce transient initialization failures under load.
 - Desktop backends use a first-frame timeout to avoid indefinite startup hangs.
 - For diagnostics after failure, use `Session.StderrTail(n)`.
 

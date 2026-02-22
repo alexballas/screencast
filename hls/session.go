@@ -21,7 +21,7 @@ import (
 
 const (
 	defaultDeleteThreshold = 36
-	defaultStartupTimeout  = 25 * time.Second
+	defaultStartupTimeout  = 40 * time.Second
 	defaultTempDirPrefix   = "screencast-hls-"
 	defaultMaxFrameRate    = 60
 	defaultHighResCapFPS   = 30
@@ -52,6 +52,8 @@ type Options struct {
 type Session struct {
 	dir        string
 	stream     io.ReadCloser
+	audioSrc   io.ReadCloser
+	ownAudio   bool
 	cmd        *exec.Cmd
 	audioL     net.Listener
 	ffmpegDone chan error
@@ -67,9 +69,7 @@ func Start(options *Options) (*Session, error) {
 	debugEnabled := envDebugEnabled()
 	if debugEnabled {
 		// Umbrella debug mode: emit ffmpeg stderr and print the full command.
-		if opts.LogOutput == nil {
-			opts.LogOutput = envDebugOutput()
-		}
+		opts.LogOutput = mergeDebugWriter(opts.LogOutput)
 		opts.DebugCommand = true
 	}
 
@@ -99,12 +99,28 @@ func Start(options *Options) (*Session, error) {
 		fpsArg,
 	)
 
-	audioEnabled := opts.IncludeAudio && stream.Audio != nil
+	audioSource := stream.Audio
+	ownAudioSource := false
+	if opts.IncludeAudio && audioSource == nil {
+		audioSource = newSilencePCMReader(48000, 2, 16, 20*time.Millisecond)
+		ownAudioSource = true
+		if opts.LogOutput != nil {
+			_, _ = fmt.Fprintln(opts.LogOutput, "screencast audio source: synthetic_silence")
+		}
+		if debugEnabled {
+			envDebugPrintf("screencast/hls audio_source=synthetic_silence")
+		}
+	}
+
+	audioEnabled := opts.IncludeAudio && audioSource != nil
 	audioURL := ""
 	var audioL net.Listener
 	if audioEnabled {
 		audioL, err = net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
+			if ownAudioSource && audioSource != nil {
+				_ = audioSource.Close()
+			}
 			_ = stream.Close()
 			_ = os.RemoveAll(tempDir)
 			return nil, fmt.Errorf("screencast audio listener: %w", err)
@@ -118,7 +134,7 @@ func Start(options *Options) (*Session, error) {
 			}
 			defer conn.Close()
 			relayAudioWithDrop(conn, audio, opts.AudioChunkSize, opts.AudioRelayQueue)
-		}(audioL, stream.Audio)
+		}(audioL, audioSource)
 
 		audioURL = fmt.Sprintf("tcp://%s", audioL.Addr().String())
 		if opts.LogOutput != nil {
@@ -212,6 +228,9 @@ func Start(options *Options) (*Session, error) {
 		if audioL != nil {
 			_ = audioL.Close()
 		}
+		if ownAudioSource && audioSource != nil {
+			_ = audioSource.Close()
+		}
 		_ = stream.Close()
 		_ = os.RemoveAll(tempDir)
 		return nil, fmt.Errorf("screencast ffmpeg start: %w", err)
@@ -220,6 +239,8 @@ func Start(options *Options) (*Session, error) {
 	s := &Session{
 		dir:        tempDir,
 		stream:     stream,
+		audioSrc:   audioSource,
+		ownAudio:   ownAudioSource,
 		cmd:        cmd,
 		audioL:     audioL,
 		ffmpegDone: make(chan error, 1),
@@ -295,6 +316,9 @@ func (s *Session) Close() error {
 				out = errors.Join(out, err)
 			case <-time.After(1500 * time.Millisecond):
 			}
+		}
+		if s.ownAudio && s.audioSrc != nil {
+			out = errors.Join(out, s.audioSrc.Close())
 		}
 
 		if s.dir != "" {
@@ -401,18 +425,41 @@ func waitForPlaylistReady(path, baseDir string, timeout time.Duration, ffmpegDon
 
 	t := time.NewTicker(150 * time.Millisecond)
 	defer t.Stop()
+	diagT := time.NewTicker(2 * time.Second)
+	defer diagT.Stop()
 
 	for {
 		select {
 		case err := <-ffmpegDone:
 			if err != nil {
+				if envDebugEnabled() {
+					envDebugPrintf("screencast/hls wait_playlist ffmpeg_exit err=%v", err)
+				}
 				return fmt.Errorf("screencast ffmpeg exited: %w: %s", err, ffmpegStderr.Tail(300))
+			}
+			if envDebugEnabled() {
+				envDebugPrintf("screencast/hls wait_playlist ffmpeg_exit_without_error")
 			}
 			return errors.New("screencast stream not initialized")
 		case <-ctx.Done():
+			if envDebugEnabled() {
+				envDebugPrintf("screencast/hls wait_playlist timeout=%s stderr_tail=%q", timeout, ffmpegStderr.Tail(300))
+			}
 			return fmt.Errorf("screencast stream not initialized: %s", ffmpegStderr.Tail(300))
+		case <-diagT.C:
+			if envDebugEnabled() {
+				info, err := os.Stat(path)
+				if err != nil {
+					envDebugPrintf("screencast/hls wait_playlist pending playlist=%s stat_err=%q", path, err)
+				} else {
+					envDebugPrintf("screencast/hls wait_playlist pending playlist=%s bytes=%d mtime=%s", path, info.Size(), info.ModTime().Format(time.RFC3339Nano))
+				}
+			}
 		case <-t.C:
 			if playlistReady(path, baseDir) {
+				if envDebugEnabled() {
+					envDebugPrintf("screencast/hls wait_playlist ready playlist=%s", path)
+				}
 				return nil
 			}
 		}
@@ -439,6 +486,69 @@ func playlistReady(path, baseDir string) bool {
 	}
 
 	return false
+}
+
+type silencePCMReader struct {
+	bytesPerSecond int
+	chunkBytes     int
+	closed         chan struct{}
+	closeOnce      sync.Once
+}
+
+func newSilencePCMReader(sampleRate, channels, bitsPerSample int, chunkDuration time.Duration) io.ReadCloser {
+	bytesPerSecond := sampleRate * channels * (bitsPerSample / 8)
+	if bytesPerSecond <= 0 {
+		bytesPerSecond = 48000 * 2 * 2
+	}
+	chunkBytes := int((int64(bytesPerSecond) * chunkDuration.Milliseconds()) / 1000)
+	if chunkBytes <= 0 {
+		chunkBytes = 3840
+	}
+	return &silencePCMReader{
+		bytesPerSecond: bytesPerSecond,
+		chunkBytes:     chunkBytes,
+		closed:         make(chan struct{}),
+	}
+}
+
+func (r *silencePCMReader) Read(p []byte) (int, error) {
+	select {
+	case <-r.closed:
+		return 0, io.EOF
+	default:
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	n := r.chunkBytes
+	if n > len(p) {
+		n = len(p)
+	}
+	if n <= 0 {
+		n = len(p)
+	}
+	clear(p[:n])
+
+	wait := time.Duration(int64(n) * int64(time.Second) / int64(r.bytesPerSecond))
+	if wait <= 0 {
+		return n, nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-r.closed:
+		return 0, io.EOF
+	case <-timer.C:
+		return n, nil
+	}
+}
+
+func (r *silencePCMReader) Close() error {
+	r.closeOnce.Do(func() {
+		close(r.closed)
+	})
+	return nil
 }
 
 func relayAudioWithDrop(dst io.Writer, src io.Reader, chunkSize, queueSize int) {

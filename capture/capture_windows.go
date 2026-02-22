@@ -17,8 +17,6 @@ import (
 	"fmt"
 	"io"
 	"sync"
-	"sync/atomic"
-	"time"
 	"unsafe"
 )
 
@@ -32,6 +30,8 @@ type winStreamContext struct {
 	ctx        unsafe.Pointer
 	vpw        *io.PipeWriter
 	apw        *io.PipeWriter
+	videoQ     *asyncPipeWriter
+	audioQ     *asyncPipeWriter
 	width      uint32
 	height     uint32
 	ready      chan struct{}
@@ -39,8 +39,6 @@ type winStreamContext struct {
 	heightOnce sync.Once
 	videoOnce  sync.Once
 	audioOnce  sync.Once
-	lastVSlow  atomic.Int64
-	lastASlow  atomic.Int64
 }
 
 type windowsReadCloser struct {
@@ -72,6 +70,14 @@ func (r *windowsReadCloser) Close() error {
 		var aErr error
 		if r.apw != nil {
 			aErr = r.apw.Close()
+		}
+		if ok {
+			if ctxInfo.videoQ != nil {
+				ctxInfo.videoQ.Close()
+			}
+			if ctxInfo.audioQ != nil {
+				ctxInfo.audioQ.Close()
+			}
 		}
 
 		if ok && ctxInfo.ctx != nil {
@@ -112,17 +118,12 @@ func winVideoCallbackGo(id C.int, data unsafe.Pointer, size C.uint32_t, width C.
 		captureDebugf("platform=windows stream=%d first_video_frame bytes=%d width=%d height=%d", int(id), int(size), int(width), int(height))
 	})
 
-	byteSlice := unsafe.Slice((*byte)(data), int(size))
-	start := time.Now()
-	_, err := ctxInfo.vpw.Write(byteSlice)
-	if err != nil {
-		captureDebugf("platform=windows stream=%d video_write_err=%v", int(id), err)
+	if ctxInfo.videoQ == nil || size == 0 {
 		return
 	}
-	d := time.Since(start)
-	if d > 50*time.Millisecond && captureShouldLogSlowWrite(&ctxInfo.lastVSlow, time.Second) {
-		captureDebugf("platform=windows stream=%d slow_video_write duration=%s bytes=%d", int(id), d, int(size))
-	}
+	b := make([]byte, int(size))
+	copy(b, unsafe.Slice((*byte)(data), int(size)))
+	ctxInfo.videoQ.Enqueue(b)
 }
 
 //export winAudioCallbackGo
@@ -138,17 +139,12 @@ func winAudioCallbackGo(id C.int, data unsafe.Pointer, size C.uint32_t) {
 		captureDebugf("platform=windows stream=%d first_audio_chunk bytes=%d", int(id), int(size))
 	})
 
-	byteSlice := unsafe.Slice((*byte)(data), int(size))
-	start := time.Now()
-	_, err := ctxInfo.apw.Write(byteSlice)
-	if err != nil {
-		captureDebugf("platform=windows stream=%d audio_write_err=%v", int(id), err)
+	if ctxInfo.audioQ == nil || size == 0 {
 		return
 	}
-	d := time.Since(start)
-	if d > 50*time.Millisecond && captureShouldLogSlowWrite(&ctxInfo.lastASlow, time.Second) {
-		captureDebugf("platform=windows stream=%d slow_audio_write duration=%s bytes=%d", int(id), d, int(size))
-	}
+	b := make([]byte, int(size))
+	copy(b, unsafe.Slice((*byte)(data), int(size)))
+	ctxInfo.audioQ.Enqueue(b)
 }
 
 // Windows implementation target: Windows Graphics Capture (WinRT GraphicsCaptureItem).
@@ -158,7 +154,13 @@ func open(options *Options) (*Stream, error) {
 	if err != nil {
 		return nil, err
 	}
-	captureDebugf("platform=windows open_start stream_index=%d include_audio=%t", options.StreamIndex, options.IncludeAudio)
+	captureDebugf(
+		"platform=windows open_start stream_index=%d include_audio=%t video_queue=%d audio_queue=%d",
+		options.StreamIndex,
+		options.IncludeAudio,
+		defaultCallbackVideoQueue,
+		defaultCallbackAudioQueue,
+	)
 
 	vpr, vpw := io.Pipe()
 	var apr *io.PipeReader
@@ -177,6 +179,10 @@ func open(options *Options) (*Stream, error) {
 		apw:   apw,
 		ready: make(chan struct{}),
 	}
+	ctxInfo.videoQ = newAsyncPipeWriter("windows", id, "video", vpw, defaultCallbackVideoQueue)
+	if apw != nil {
+		ctxInfo.audioQ = newAsyncPipeWriter("windows", id, "audio", apw, defaultCallbackAudioQueue)
+	}
 	winStreams[id] = ctxInfo
 	winStreamsMu.Unlock()
 
@@ -191,6 +197,10 @@ func open(options *Options) (*Stream, error) {
 		captureDebugf("platform=windows stream=%d init_with_audio_failed retrying_video_only", id)
 		// If audio initialization fails, retry video-only to keep capture functional.
 		if apw != nil {
+			if ctxInfo.audioQ != nil {
+				ctxInfo.audioQ.Close()
+				ctxInfo.audioQ = nil
+			}
 			_ = apw.Close()
 			apw = nil
 			ctxInfo.apw = nil
@@ -205,6 +215,20 @@ func open(options *Options) (*Stream, error) {
 		winStreamsMu.Lock()
 		delete(winStreams, id)
 		winStreamsMu.Unlock()
+		if ctxInfo.videoQ != nil {
+			ctxInfo.videoQ.Close()
+		}
+		if ctxInfo.audioQ != nil {
+			ctxInfo.audioQ.Close()
+		}
+		_ = vpw.Close()
+		_ = vpr.Close()
+		if apw != nil {
+			_ = apw.Close()
+		}
+		if apr != nil {
+			_ = apr.Close()
+		}
 		captureDebugf("platform=windows stream=%d init_failed stream_index=%d include_audio=%t", id, options.StreamIndex, options.IncludeAudio)
 		return nil, fmt.Errorf("failed to initialize Windows Graphics Capture session")
 	}

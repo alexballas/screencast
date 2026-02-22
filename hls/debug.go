@@ -43,3 +43,11 @@ func envDebugPrintf(format string, args ...any) {
 	})
 	debugLogger.Printf(format, args...)
 }
+
+func mergeDebugWriter(w io.Writer) io.Writer {
+	out := envDebugOutput()
+	if w == nil {
+		return out
+	}
+	return io.MultiWriter(w, out)
+}

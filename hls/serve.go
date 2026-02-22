@@ -42,6 +42,12 @@ func NewDirectoryHandler(dir string, options *DirectoryHandlerOptions) http.Hand
 		opts.Debug = true
 		if opts.Logf == nil {
 			opts.Logf = envDebugPrintf
+		} else {
+			userLogf := opts.Logf
+			opts.Logf = func(format string, args ...any) {
+				userLogf(format, args...)
+				envDebugPrintf(format, args...)
+			}
 		}
 		if opts.LogPrefix == "" {
 			opts.LogPrefix = "screencast/hls"

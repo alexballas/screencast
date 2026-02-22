@@ -19,8 +19,6 @@ import (
 	"io"
 	"math"
 	"sync"
-	"sync/atomic"
-	"time"
 	"unsafe"
 )
 
@@ -34,6 +32,8 @@ type macStreamContext struct {
 	ctx        unsafe.Pointer
 	vpw        *io.PipeWriter
 	apw        *io.PipeWriter
+	videoQ     *asyncPipeWriter
+	audioQ     *asyncPipeWriter
 	width      uint32
 	height     uint32
 	ready      chan struct{}
@@ -41,8 +41,6 @@ type macStreamContext struct {
 	heightOnce sync.Once
 	videoOnce  sync.Once
 	audioOnce  sync.Once
-	lastVSlow  atomic.Int64
-	lastASlow  atomic.Int64
 }
 
 type darwinReadCloser struct {
@@ -83,6 +81,14 @@ func (r *darwinReadCloser) Close() error {
 			aErr = r.apw.Close()
 			r.apr.Close()
 		}
+		if ok {
+			if ctxInfo.videoQ != nil {
+				ctxInfo.videoQ.Close()
+			}
+			if ctxInfo.audioQ != nil {
+				ctxInfo.audioQ.Close()
+			}
+		}
 
 		r.err = errors.Join(vErr, aErr)
 		captureDebugf("platform=macOS stream=%d close_done err=%v", r.id, r.err)
@@ -112,17 +118,12 @@ func macVideoCallbackGo(id C.int, data unsafe.Pointer, size C.uint32_t, width C.
 		captureDebugf("platform=macOS stream=%d first_video_frame bytes=%d width=%d height=%d", int(id), int(size), int(width), int(height))
 	})
 
-	byteSlice := unsafe.Slice((*byte)(data), int(size))
-	start := time.Now()
-	_, err := ctxInfo.vpw.Write(byteSlice)
-	if err != nil {
-		captureDebugf("platform=macOS stream=%d video_write_err=%v", int(id), err)
+	if ctxInfo.videoQ == nil || size == 0 {
 		return
 	}
-	d := time.Since(start)
-	if d > 50*time.Millisecond && captureShouldLogSlowWrite(&ctxInfo.lastVSlow, time.Second) {
-		captureDebugf("platform=macOS stream=%d slow_video_write duration=%s bytes=%d", int(id), d, int(size))
-	}
+	b := make([]byte, int(size))
+	copy(b, unsafe.Slice((*byte)(data), int(size)))
+	ctxInfo.videoQ.Enqueue(b)
 }
 
 //export macAudioCallbackGo
@@ -143,16 +144,10 @@ func macAudioCallbackGo(id C.int, data unsafe.Pointer, size C.uint32_t) {
 	ctxInfo.audioOnce.Do(func() {
 		captureDebugf("platform=macOS stream=%d first_audio_chunk in_bytes=%d out_bytes=%d", int(id), int(size), len(pcm))
 	})
-	start := time.Now()
-	_, err := ctxInfo.apw.Write(pcm)
-	if err != nil {
-		captureDebugf("platform=macOS stream=%d audio_write_err=%v", int(id), err)
+	if ctxInfo.audioQ == nil {
 		return
 	}
-	d := time.Since(start)
-	if d > 50*time.Millisecond && captureShouldLogSlowWrite(&ctxInfo.lastASlow, time.Second) {
-		captureDebugf("platform=macOS stream=%d slow_audio_write duration=%s bytes=%d", int(id), d, len(pcm))
-	}
+	ctxInfo.audioQ.Enqueue(pcm)
 }
 
 // macOS implementation target: ScreenCaptureKit (SCShareableContent + SCStream).
@@ -162,7 +157,13 @@ func open(options *Options) (*Stream, error) {
 	if err != nil {
 		return nil, err
 	}
-	captureDebugf("platform=macOS open_start stream_index=%d include_audio=%t", options.StreamIndex, options.IncludeAudio)
+	captureDebugf(
+		"platform=macOS open_start stream_index=%d include_audio=%t video_queue=%d audio_queue=%d",
+		options.StreamIndex,
+		options.IncludeAudio,
+		defaultCallbackVideoQueue,
+		defaultCallbackAudioQueue,
+	)
 
 	vpr, vpw := io.Pipe()
 	var apr *io.PipeReader
@@ -181,6 +182,10 @@ func open(options *Options) (*Stream, error) {
 		apw:   apw,
 		ready: make(chan struct{}),
 	}
+	ctxInfo.videoQ = newAsyncPipeWriter("macOS", id, "video", vpw, defaultCallbackVideoQueue)
+	if apw != nil {
+		ctxInfo.audioQ = newAsyncPipeWriter("macOS", id, "audio", apw, defaultCallbackAudioQueue)
+	}
 	macStreams[id] = ctxInfo
 	macStreamsMu.Unlock()
 
@@ -195,6 +200,20 @@ func open(options *Options) (*Stream, error) {
 		macStreamsMu.Lock()
 		delete(macStreams, id)
 		macStreamsMu.Unlock()
+		if ctxInfo.videoQ != nil {
+			ctxInfo.videoQ.Close()
+		}
+		if ctxInfo.audioQ != nil {
+			ctxInfo.audioQ.Close()
+		}
+		_ = vpw.Close()
+		_ = vpr.Close()
+		if apw != nil {
+			_ = apw.Close()
+		}
+		if apr != nil {
+			_ = apr.Close()
+		}
 		captureDebugf("platform=macOS stream=%d init_failed stream_index=%d include_audio=%t", id, options.StreamIndex, options.IncludeAudio)
 		return nil, fmt.Errorf("failed to initialize Mac ScreenCaptureKit session")
 	}
