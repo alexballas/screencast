@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"go2tv.app/screencast/capture"
+	"go2tv.app/screencast/internal/processutil"
 )
 
 func main() {
@@ -63,6 +64,7 @@ func main() {
 	cmd.Stdin = stream
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	processutil.HideConsoleWindow(cmd)
 
 	if err := cmd.Start(); err != nil {
 		log.Fatalf("Failed to start ffmpeg: %v", err)

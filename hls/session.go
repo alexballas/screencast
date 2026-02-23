@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"go2tv.app/screencast/capture"
+	"go2tv.app/screencast/internal/processutil"
 )
 
 const (
@@ -226,6 +227,7 @@ func Start(options *Options) (*Session, error) {
 	cmd := exec.Command(opts.FFmpegPath, args...)
 	cmd.Stdin = stream
 	cmd.Stderr = stderrWriter
+	processutil.HideConsoleWindow(cmd)
 	if err := cmd.Start(); err != nil {
 		if audioL != nil {
 			_ = audioL.Close()
