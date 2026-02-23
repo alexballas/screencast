@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	defaultCallbackVideoQueue = 4
+	defaultCallbackVideoQueue = 8
 	defaultCallbackAudioQueue = 256
 )
 
