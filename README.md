@@ -164,6 +164,15 @@ Legacy variables still supported:
 - Desktop backends use a first-frame timeout to avoid indefinite startup hangs.
 - For diagnostics after failure, use `Session.StderrTail(n)`.
 
+## Used by
+
+- [go2tv](https://go2tv.app/) - Cast videos, music, and images from Linux to your TV.
+
+## Related projects
+
+- [go2tv](https://go2tv.app/) - Cast videos, music, and images from Linux to your TV.
+- [mcp-beam](https://go2tv.app/mcp-beam) - MCP server (stdio transport) for casting local files and media URLs to Chromecast and DLNA/UPnP devices on your LAN.
+
 ## License
 
 MIT
