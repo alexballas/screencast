@@ -11,9 +11,18 @@
 @property (nonatomic, strong) SCStream *stream;
 @property (nonatomic, strong) dispatch_queue_t queue;
 @property (nonatomic, assign) BOOL includeAudio;
+@property (nonatomic, assign) uint8_t *packedBuf;
+@property (nonatomic, assign) size_t packedBufSize;
 @end
 
 @implementation MacCaptureSession
+
+- (void)dealloc {
+    if (_packedBuf) {
+        free(_packedBuf);
+        _packedBuf = NULL;
+    }
+}
 
 - (instancetype)initWithID:(int)goID streamIndex:(int)streamIndex includeAudio:(BOOL)includeAudio vcb:(VideoFrameCallback)vcb acb:(AudioFrameCallback)acb {
     self = [super init];
@@ -90,15 +99,35 @@
     if (type == SCStreamOutputTypeScreen) {
         CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
         if (!imageBuffer) return;
-        
+
         CVPixelBufferLockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
         void *baseAddress = CVPixelBufferGetBaseAddress(imageBuffer);
         size_t bytesPerRow = CVPixelBufferGetBytesPerRow(imageBuffer);
         size_t width = CVPixelBufferGetWidth(imageBuffer);
         size_t height = CVPixelBufferGetHeight(imageBuffer);
-        
+
         if (baseAddress && self.videoCallback) {
-            self.videoCallback(self.goID, baseAddress, (uint32_t)(bytesPerRow * height), (uint32_t)width, (uint32_t)height);
+            size_t rowBytes = width * 4;
+            size_t packedSize = rowBytes * height;
+
+            if (bytesPerRow == rowBytes) {
+                // No row padding — pass buffer directly.
+                self.videoCallback(self.goID, baseAddress, (uint32_t)packedSize, (uint32_t)width, (uint32_t)height);
+            } else {
+                // Row padding present — strip it so FFmpeg sees tightly-packed rows.
+                if (self.packedBufSize < packedSize) {
+                    free(self.packedBuf);
+                    self.packedBuf = (uint8_t *)malloc(packedSize);
+                    self.packedBufSize = self.packedBuf ? packedSize : 0;
+                }
+                if (self.packedBuf) {
+                    const uint8_t *src = (const uint8_t *)baseAddress;
+                    for (size_t y = 0; y < height; y++) {
+                        memcpy(self.packedBuf + y * rowBytes, src + y * bytesPerRow, rowBytes);
+                    }
+                    self.videoCallback(self.goID, self.packedBuf, (uint32_t)packedSize, (uint32_t)width, (uint32_t)height);
+                }
+            }
         }
         CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
     } else {
