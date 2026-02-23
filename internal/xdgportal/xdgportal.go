@@ -1,4 +1,4 @@
-package screencast
+package xdgportal
 
 import (
 	"fmt"

@@ -105,11 +105,22 @@ func main() {
 }
 ```
 
-## Running the Example
+## Running the Examples
 
 ```bash
 go run examples/capture/main.go
 ```
+
+```bash
+go run examples/hls/main.go
+```
+
+HLS example output is served at `http://127.0.0.1:8080/playlist.m3u8` by default.
+Optional environment variables:
+
+- `SCREENCAST_FFMPEG=/path/to/ffmpeg` (default: `ffmpeg`)
+- `SCREENCAST_HLS_PORT=8080`
+- `SCREENCAST_HLS_AUDIO=1` (set `0` to disable audio)
 
 ## Cross-Platform Status
 

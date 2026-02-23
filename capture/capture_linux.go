@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"go2tv.app/screencast/internal/pipewire"
-	"go2tv.app/screencast/screencast"
+	"go2tv.app/screencast/internal/xdgportal"
 )
 
 const defaultLinuxFrameRate = 60
@@ -19,7 +19,7 @@ const defaultLinuxFrameRate = 60
 type linuxReadCloser struct {
 	stream *pipewire.Stream
 	audio  *pipewire.Stream
-	sess   *screencast.Session
+	sess   *xdgportal.Session
 
 	once sync.Once
 	err  error
@@ -58,7 +58,7 @@ func open(options *Options) (*Stream, error) {
 		return nil, pipewire.ErrLibraryNotLoaded
 	}
 
-	sess, err := screencast.CreateSession(nil)
+	sess, err := xdgportal.CreateSession(nil)
 	if err != nil {
 		captureDebugf("platform=linux create_session_failed err=%v", err)
 		return nil, err
@@ -76,9 +76,9 @@ func open(options *Options) (*Stream, error) {
 		}
 	}()
 
-	err = sess.SelectSources(&screencast.SelectSourcesOptions{
-		Types:      screencast.SourceTypeMonitor | screencast.SourceTypeWindow,
-		CursorMode: screencast.CursorModeEmbedded,
+	err = sess.SelectSources(&xdgportal.SelectSourcesOptions{
+		Types:      xdgportal.SourceTypeMonitor | xdgportal.SourceTypeWindow,
+		CursorMode: xdgportal.CursorModeEmbedded,
 		Multiple:   true,
 	})
 	if err != nil {
