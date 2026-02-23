@@ -121,6 +121,7 @@ Optional environment variables:
 - `SCREENCAST_FFMPEG=/path/to/ffmpeg` (default: `ffmpeg`)
 - `SCREENCAST_HLS_PORT=8080`
 - `SCREENCAST_HLS_AUDIO=1` (set `0` to disable audio)
+- Video encoder is auto-selected per host by probing the configured ffmpeg binary and running a short real encode test on hardware candidates (`h264_nvenc`, `h264_amf`, `h264_qsv`, `h264_vaapi`, `h264_videotoolbox`). If none pass, it falls back to `libx264`.
 
 ## Cross-Platform Status
 

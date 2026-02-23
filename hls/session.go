@@ -95,10 +95,11 @@ func Start(options *Options) (*Session, error) {
 	}
 
 	playlistPath := filepath.Join(tempDir, "playlist.m3u8")
-	vf := fmt.Sprintf(
+	baseVideoFilter := fmt.Sprintf(
 		"fps=%s,scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
 		fpsArg,
 	)
+	encoderPlan := selectVideoEncoder(opts.FFmpegPath, baseVideoFilter, gopArg, opts.HLSTimeSeconds, opts.LogOutput, debugEnabled)
 
 	audioSource := stream.Audio
 	ownAudioSource := false
@@ -143,7 +144,12 @@ func Start(options *Options) (*Session, error) {
 		}
 	}
 
-	args := []string{
+	args := []string{}
+	if debugEnabled {
+		args = append(args, "-loglevel", "debug")
+	}
+	args = append(args, encoderPlan.globalArgs...)
+	args = append(args,
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
 		"-probesize", "32",
@@ -154,10 +160,7 @@ func Start(options *Options) (*Session, error) {
 		"-s", fmt.Sprintf("%dx%d", stream.Width, stream.Height),
 		"-r", fpsArg,
 		"-i", "pipe:0",
-	}
-	if debugEnabled {
-		args = append([]string{"-loglevel", "debug"}, args...)
-	}
+	)
 	if audioEnabled {
 		args = append(args,
 			"-thread_queue_size", strconv.Itoa(opts.AudioQueueSize),
@@ -179,19 +182,11 @@ func Start(options *Options) (*Session, error) {
 
 	args = append(args,
 		"-r", fpsArg,
-		"-c:v", "libx264",
-		"-preset", "ultrafast",
-		"-tune", "zerolatency",
-		"-b:v", "4000k",
-		"-maxrate", "5000k",
-		"-bufsize", "10000k",
-		"-pix_fmt", "yuv420p",
-		"-vf", vf,
-		"-g", gopArg,
-		"-keyint_min", gopArg,
-		"-sc_threshold", "0",
-		"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", opts.HLSTimeSeconds),
 	)
+	if strings.TrimSpace(encoderPlan.videoFilter) != "" {
+		args = append(args, "-vf", encoderPlan.videoFilter)
+	}
+	args = append(args, encoderPlan.codecArgs...)
 	if audioEnabled {
 		args = append(args,
 			"-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
