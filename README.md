@@ -5,8 +5,8 @@ Supports Linux (`xdg-desktop-portal` + PipeWire), macOS (ScreenCaptureKit), and 
 
 ## Features
 
-- **Cross-Platform:** Native OS dialogs or direct capture APIs on Linux, macOS 13+, and Windows 10+.
-- **Zero-Copy Performance (Linux):** Uses `cgo` and `libpipewire-0.3` to access PipeWire's shared-memory DMA-BUF/memfd buffers, avoiding expensive memory copies.
+- **Cross-Platform:** Native OS dialogs or direct capture APIs on Linux, macOS 12.3+ (audio on 13+), and Windows 10+.
+- **High-Performance Linux Backend:** Uses `cgo` and `libpipewire-0.3` to access PipeWire streams with low-overhead buffering for real-time capture.
 - **Unified `io.Reader` Interface:** Pipe raw `BGRA` frames directly into `ffmpeg` or any standard Go stream.
 - **Audio Capture:** Optional system audio capture (48kHz, 16-bit, stereo) on supported platforms.
 - **Graceful Fallback:** Dynamically loads the PipeWire C library at runtime (`dlopen`).
@@ -21,8 +21,9 @@ Supports Linux (`xdg-desktop-portal` + PipeWire), macOS (ScreenCaptureKit), and 
 - `libpipewire-0.3-dev` (Only required at **build time** for C headers)
 
 ### macOS
-- macOS 13.0 or later
+- macOS 12.3 or later
 - CGO enabled
+- System audio capture requires macOS 13.0 or later
 
 ### Windows
 - Windows 10 (1809) or later
@@ -159,7 +160,7 @@ Legacy variables still supported:
 - `hls.Session` cleanup is idempotent (`Close()` can be called multiple times safely).
 - If ffmpeg exits unexpectedly, session resources are now auto-cleaned.
 - When audio is requested but platform capture audio is unavailable, HLS injects paced synthetic silence so the audio track remains present.
-- Default startup timeout is 40s to reduce transient initialization failures under load.
+- Default startup timeout is 60s to reduce transient initialization failures under load.
 - Desktop backends use a first-frame timeout to avoid indefinite startup hangs.
 - For diagnostics after failure, use `Session.StderrTail(n)`.
 
