@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,10 +23,22 @@ func main() {
 	}
 
 	listenPort := hls.IntEnvClamped("SCREENCAST_HLS_PORT", 8080, 1, 65535)
+	streamIndex := 0
+	if raw := strings.TrimSpace(os.Getenv("SCREENCAST_STREAM_INDEX")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			log.Fatalf("invalid SCREENCAST_STREAM_INDEX %q: %v", raw, err)
+		}
+		if parsed < 0 {
+			log.Fatalf("invalid SCREENCAST_STREAM_INDEX %q: must be >= 0", raw)
+		}
+		streamIndex = parsed
+	}
 
 	session, err := hls.Start(&hls.Options{
 		FFmpegPath:   ffmpegPath,
 		IncludeAudio: hls.BoolEnv("SCREENCAST_HLS_AUDIO", true),
+		StreamIndex:  streamIndex,
 		LogOutput:    os.Stderr,
 	})
 	if err != nil {
@@ -44,7 +58,7 @@ func main() {
 		}
 	}()
 
-	fmt.Printf("Serving HLS on http://%s/playlist.m3u8\n", server.Addr)
+	fmt.Printf("Serving HLS on http://%s/playlist.m3u8 (stream index %d)\n", server.Addr, streamIndex)
 	fmt.Println("Press Ctrl+C to stop")
 
 	sig := make(chan os.Signal, 1)

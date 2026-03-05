@@ -2,7 +2,54 @@
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import "capture_darwin.h"
+
+static SCShareableContent *GetShareableContentSync(void) {
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block SCShareableContent *shareableContent = nil;
+    [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent *content, NSError *error) {
+        if (error == nil) {
+            shareableContent = content;
+        }
+        dispatch_semaphore_signal(sem);
+    }];
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    return shareableContent;
+}
+
+int GetMacDisplayCount(void) {
+    SCShareableContent *shareableContent = GetShareableContentSync();
+    if (!shareableContent) {
+        return 0;
+    }
+    return (int)shareableContent.displays.count;
+}
+
+bool GetMacDisplayInfo(int index, uint32_t *displayID, uint32_t *width, uint32_t *height, bool *isPrimary) {
+    SCShareableContent *shareableContent = GetShareableContentSync();
+    if (!shareableContent) {
+        return false;
+    }
+    if (index < 0 || index >= (int)shareableContent.displays.count) {
+        return false;
+    }
+
+    SCDisplay *display = shareableContent.displays[index];
+    if (displayID) {
+        *displayID = (uint32_t)display.displayID;
+    }
+    if (width) {
+        *width = (uint32_t)display.width;
+    }
+    if (height) {
+        *height = (uint32_t)display.height;
+    }
+    if (isPrimary) {
+        *isPrimary = ((uint32_t)CGMainDisplayID() == (uint32_t)display.displayID);
+    }
+    return true;
+}
 
 @interface MacCaptureSession : NSObject <SCStreamDelegate, SCStreamOutput>
 @property (nonatomic, assign) int goID;
@@ -33,15 +80,7 @@
         self.includeAudio = includeAudio;
         self.queue = dispatch_queue_create("screencast_mac", DISPATCH_QUEUE_SERIAL);
         
-        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-        __block SCShareableContent *shareableContent = nil;
-        
-        [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent *content, NSError *error) {
-            shareableContent = content;
-            dispatch_semaphore_signal(sem);
-        }];
-        
-        dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+        SCShareableContent *shareableContent = GetShareableContentSync();
         
         if (!shareableContent || shareableContent.displays.count == 0) {
             return nil;

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"go2tv.app/screencast/capture"
@@ -19,8 +21,32 @@ func main() {
 	fmt.Println("Screen capture with live transcoding to H.264...")
 	fmt.Println("Press Ctrl+C to stop")
 
-	// Audio is enabled by default.
-	stream, err := capture.Open(nil)
+	streamIndex := 0
+	if raw := strings.TrimSpace(os.Getenv("SCREENCAST_STREAM_INDEX")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			log.Fatalf("Invalid SCREENCAST_STREAM_INDEX %q: %v", raw, err)
+		}
+		if parsed < 0 {
+			log.Fatalf("Invalid SCREENCAST_STREAM_INDEX %q: must be >= 0", raw)
+		}
+		streamIndex = parsed
+	}
+
+	displays, err := capture.ListDisplays()
+	if err == nil {
+		fmt.Println("Available displays:")
+		for _, d := range displays {
+			fmt.Printf("[%d] %s (%dx%d) primary=%t\n", d.Index, d.Name, d.Width, d.Height, d.Primary)
+		}
+	} else if !errors.Is(err, capture.ErrNotImplemented) {
+		fmt.Printf("Warning: failed to list displays: %v\n", err)
+	}
+
+	stream, err := capture.Open(&capture.Options{
+		StreamIndex:  streamIndex,
+		IncludeAudio: true,
+	})
 	if err != nil {
 		log.Fatalf("Failed to open capture stream: %v", err)
 	}
@@ -39,7 +65,7 @@ func main() {
 	if frameRate == 0 {
 		frameRate = 60
 	}
-	fmt.Printf("Capturing: %dx%d %s @ %d FPS\n", width, height, stream.PixelFormat, frameRate)
+	fmt.Printf("Capturing stream index %d: %dx%d %s @ %d FPS\n", streamIndex, width, height, stream.PixelFormat, frameRate)
 
 	outputPath := "output.mp4"
 	absoluteOutputPath, err := filepath.Abs(outputPath)

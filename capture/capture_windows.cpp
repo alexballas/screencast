@@ -127,12 +127,49 @@ static inline auto CreateDirect3DDevice(ID3D11Device* d3dDevice) {
 struct MonitorInfo {
     HMONITOR hMonitor;
     RECT rect;
+    bool primary;
 };
 
 static BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC, LPRECT lprcMonitor, LPARAM dwData) {
     auto monitors = reinterpret_cast<std::vector<MonitorInfo>*>(dwData);
-    monitors->push_back({ hMonitor, *lprcMonitor });
+    MONITORINFO monitorInfo = {};
+    monitorInfo.cbSize = sizeof(MONITORINFO);
+    bool isPrimary = false;
+    if (GetMonitorInfoW(hMonitor, &monitorInfo)) {
+        isPrimary = (monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0;
+    }
+    monitors->push_back({ hMonitor, *lprcMonitor, isPrimary });
     return TRUE;
+}
+
+static std::vector<MonitorInfo> EnumerateMonitors() {
+    std::vector<MonitorInfo> monitors;
+    EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, reinterpret_cast<LPARAM>(&monitors));
+    return monitors;
+}
+
+int GetWinMonitorCount(void) {
+    auto monitors = EnumerateMonitors();
+    return static_cast<int>(monitors.size());
+}
+
+bool GetWinMonitorInfo(int index, uint32_t *width, uint32_t *height, bool *isPrimary) {
+    auto monitors = EnumerateMonitors();
+    if (index < 0 || index >= static_cast<int>(monitors.size())) {
+        return false;
+    }
+
+    const auto &m = monitors[static_cast<size_t>(index)];
+    if (width) {
+        *width = static_cast<uint32_t>(m.rect.right - m.rect.left);
+    }
+    if (height) {
+        *height = static_cast<uint32_t>(m.rect.bottom - m.rect.top);
+    }
+    if (isPrimary) {
+        *isPrimary = m.primary;
+    }
+    return true;
 }
 
 static DWORD WINAPI AudioCaptureThreadProc(LPVOID param) {
@@ -206,8 +243,7 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
     sess->audioCallback = acb;
     sess->includeAudio = includeAudio;
     
-    std::vector<MonitorInfo> monitors;
-    EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, reinterpret_cast<LPARAM>(&monitors));
+    std::vector<MonitorInfo> monitors = EnumerateMonitors();
     
     if (monitors.empty() || streamIndex >= monitors.size() || streamIndex < 0) {
         if (streamIndex != 0) {

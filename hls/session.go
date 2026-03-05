@@ -35,8 +35,10 @@ const (
 )
 
 type Options struct {
-	FFmpegPath         string
-	IncludeAudio       bool
+	FFmpegPath   string
+	IncludeAudio bool
+	// StreamIndex selects the display/stream index passed to capture.Open (default 0).
+	StreamIndex        int
 	HLSDeleteThreshold int
 	HLSTimeSeconds     int
 	HLSListSize        int
@@ -76,7 +78,10 @@ func Start(options *Options) (*Session, error) {
 
 	cleanupOldTempDirs(opts.TempDirPrefix, 12*time.Hour)
 
-	stream, err := capture.Open(&capture.Options{IncludeAudio: opts.IncludeAudio})
+	stream, err := capture.Open(&capture.Options{
+		StreamIndex:  opts.StreamIndex,
+		IncludeAudio: opts.IncludeAudio,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("screencast open: %w", err)
 	}
@@ -337,6 +342,9 @@ func normalizeOptions(options *Options) (*Options, error) {
 	}
 
 	opts := *options
+	if opts.StreamIndex < 0 {
+		return nil, errors.New("stream index must be >= 0")
+	}
 	if opts.StartupTimeout <= 0 {
 		opts.StartupTimeout = defaultStartupTimeout
 	}

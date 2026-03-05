@@ -11,6 +11,8 @@ extern "C" {
 typedef void (*VideoFrameCallback)(int id, void *data, uint32_t size, uint32_t width, uint32_t height);
 typedef void (*AudioFrameCallback)(int id, void *data, uint32_t size);
 
+int GetMacDisplayCount(void);
+bool GetMacDisplayInfo(int index, uint32_t *displayID, uint32_t *width, uint32_t *height, bool *isPrimary);
 void* InitMacCapture(int id, int streamIndex, bool includeAudio, VideoFrameCallback vcb, AudioFrameCallback acb);
 void StartMacCapture(void* ctx);
 void StopMacCapture(void* ctx);

@@ -59,7 +59,7 @@ import (
 )
 
 func main() {
-	// Audio is enabled by default. Use &capture.Options{IncludeAudio: false} to disable.
+	// Default open enables audio and captures StreamIndex 0.
 	stream, err := capture.Open(nil)
 	if err != nil {
 		log.Fatalf("Failed to open capture stream: %v", err)
@@ -105,6 +105,35 @@ func main() {
 }
 ```
 
+## Selecting Displays (macOS/Windows)
+
+For app-driven selection, enumerate displays first and pass the chosen index to `capture.Open`.
+
+```go
+displays, err := capture.ListDisplays()
+if err != nil {
+	// On unsupported platforms (e.g. Linux), this returns capture.ErrNotImplemented.
+}
+for _, d := range displays {
+	fmt.Printf("[%d] %s (%dx%d) primary=%t\n", d.Index, d.Name, d.Width, d.Height, d.Primary)
+}
+
+stream, err := capture.Open(&capture.Options{
+	StreamIndex:  1,   // user-selected display index
+	IncludeAudio: true,
+})
+```
+
+The same index can be forwarded to HLS:
+
+```go
+session, err := hls.Start(&hls.Options{
+	FFmpegPath:   "ffmpeg",
+	IncludeAudio: true,
+	StreamIndex:  1, // same display index selection
+})
+```
+
 ## Running the Examples
 
 ```bash
@@ -112,7 +141,15 @@ go run examples/capture/main.go
 ```
 
 ```bash
+SCREENCAST_STREAM_INDEX=1 go run examples/capture/main.go
+```
+
+```bash
 go run examples/hls/main.go
+```
+
+```bash
+SCREENCAST_STREAM_INDEX=1 go run examples/hls/main.go
 ```
 
 HLS example output is served at `http://127.0.0.1:8080/playlist.m3u8` by default.
@@ -121,6 +158,7 @@ Optional environment variables:
 - `SCREENCAST_FFMPEG=/path/to/ffmpeg` (default: `ffmpeg`)
 - `SCREENCAST_HLS_PORT=8080`
 - `SCREENCAST_HLS_AUDIO=1` (set `0` to disable audio)
+- `SCREENCAST_STREAM_INDEX=0` (set monitor/display index for both examples)
 - Video encoder is auto-selected per host by probing the configured ffmpeg binary and running a short real encode test on hardware candidates (`h264_nvenc`, `h264_amf`, `h264_qsv`, `h264_vaapi`, `h264_videotoolbox`). If none pass, it falls back to `libx264`.
 
 ## Cross-Platform Status

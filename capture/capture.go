@@ -19,7 +19,7 @@ var (
 
 // Options configures a capture session.
 type Options struct {
-	// StreamIndex selects the stream from the OS chooser result. Default is 0.
+	// StreamIndex selects the stream/monitor index. Default is 0.
 	StreamIndex int
 	// IncludeAudio requests that the system's default audio output also be captured.
 	IncludeAudio bool
