@@ -21,17 +21,19 @@ import (
 )
 
 const (
-	defaultDeleteThreshold = 36
-	defaultStartupTimeout  = 60 * time.Second
-	defaultTempDirPrefix   = "screencast-hls-"
-	defaultMaxFrameRate    = 60
-	defaultHighResCapFPS   = 30
-	defaultVideoQueueSize  = 2048
-	defaultAudioQueueSize  = 8192
-	defaultAudioChunkSize  = 4096
-	defaultAudioRelayQueue = 384
-	defaultHLSTimeSeconds  = 1
-	defaultHLSListSize     = 24
+	defaultDeleteThreshold  = 36
+	defaultStartupTimeout   = 60 * time.Second
+	defaultTempDirPrefix    = "screencast-hls-"
+	defaultMaxFrameRate     = 60
+	defaultHighResCapFPS    = 30
+	defaultLinux1440pCapFPS = 15
+	defaultLinux4KCapFPS    = 10
+	defaultVideoQueueSize   = 2048
+	defaultAudioQueueSize   = 8192
+	defaultAudioChunkSize   = 4096
+	defaultAudioRelayQueue  = 384
+	defaultHLSTimeSeconds   = 1
+	defaultHLSListSize      = 24
 )
 
 type Options struct {
@@ -87,6 +89,16 @@ func Start(options *Options) (*Session, error) {
 	}
 
 	fps := targetFPS(stream)
+	if debugEnabled {
+		envDebugPrintf(
+			"screencast/hls fps_target platform=%s width=%d height=%d source=%d target=%d",
+			runtime.GOOS,
+			stream.Width,
+			stream.Height,
+			stream.FrameRate,
+			fps,
+		)
+	}
 	fpsArg := strconv.FormatUint(uint64(fps), 10)
 	gopFrames := uint64(fps) * uint64(opts.HLSTimeSeconds)
 	if gopFrames == 0 {
@@ -410,6 +422,10 @@ func normalizeOptions(options *Options) (*Options, error) {
 }
 
 func targetFPS(stream *capture.Stream) uint32 {
+	return targetFPSForPlatform(runtime.GOOS, stream)
+}
+
+func targetFPSForPlatform(goos string, stream *capture.Stream) uint32 {
 	frameRate := stream.FrameRate
 	if frameRate == 0 {
 		frameRate = defaultMaxFrameRate
@@ -421,6 +437,14 @@ func targetFPS(stream *capture.Stream) uint32 {
 	}
 	if stream.Width*stream.Height > 1920*1080 && target > defaultHighResCapFPS {
 		target = defaultHighResCapFPS
+	}
+	if goos == "linux" {
+		pixels := uint64(stream.Width) * uint64(stream.Height)
+		if pixels >= 3840*2160 && target > defaultLinux4KCapFPS {
+			target = defaultLinux4KCapFPS
+		} else if pixels > 1920*1080 && target > defaultLinux1440pCapFPS {
+			target = defaultLinux1440pCapFPS
+		}
 	}
 
 	return target
