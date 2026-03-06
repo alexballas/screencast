@@ -21,19 +21,17 @@ import (
 )
 
 const (
-	defaultDeleteThreshold  = 36
-	defaultStartupTimeout   = 60 * time.Second
-	defaultTempDirPrefix    = "screencast-hls-"
-	defaultMaxFrameRate     = 60
-	defaultHighResCapFPS    = 30
-	defaultLinux1440pCapFPS = 15
-	defaultLinux4KCapFPS    = 10
-	defaultVideoQueueSize   = 2048
-	defaultAudioQueueSize   = 8192
-	defaultAudioChunkSize   = 4096
-	defaultAudioRelayQueue  = 384
-	defaultHLSTimeSeconds   = 1
-	defaultHLSListSize      = 24
+	defaultDeleteThreshold = 36
+	defaultStartupTimeout  = 60 * time.Second
+	defaultTempDirPrefix   = "screencast-hls-"
+	defaultMaxFrameRate    = 60
+	defaultHighResCapFPS   = 30
+	defaultVideoQueueSize  = 2048
+	defaultAudioQueueSize  = 8192
+	defaultAudioChunkSize  = 4096
+	defaultAudioRelayQueue = 384
+	defaultHLSTimeSeconds  = 1
+	defaultHLSListSize     = 24
 )
 
 type Options struct {
@@ -80,7 +78,7 @@ func Start(options *Options) (*Session, error) {
 
 	cleanupOldTempDirs(opts.TempDirPrefix, 12*time.Hour)
 
-	stream, err := capture.Open(&capture.Options{
+	captureStream, err := capture.Open(&capture.Options{
 		StreamIndex:  opts.StreamIndex,
 		IncludeAudio: opts.IncludeAudio,
 	})
@@ -88,14 +86,14 @@ func Start(options *Options) (*Session, error) {
 		return nil, fmt.Errorf("screencast open: %w", err)
 	}
 
-	fps := targetFPS(stream)
+	fps := targetFPS(captureStream)
 	if debugEnabled {
 		envDebugPrintf(
 			"screencast/hls fps_target platform=%s width=%d height=%d source=%d target=%d",
 			runtime.GOOS,
-			stream.Width,
-			stream.Height,
-			stream.FrameRate,
+			captureStream.Width,
+			captureStream.Height,
+			captureStream.FrameRate,
 			fps,
 		)
 	}
@@ -107,7 +105,7 @@ func Start(options *Options) (*Session, error) {
 	gopArg := strconv.FormatUint(gopFrames, 10)
 	tempDir, err := os.MkdirTemp("", opts.TempDirPrefix)
 	if err != nil {
-		_ = stream.Close()
+		_ = captureStream.Close()
 		return nil, fmt.Errorf("screencast temp dir: %w", err)
 	}
 
@@ -118,7 +116,17 @@ func Start(options *Options) (*Session, error) {
 	)
 	encoderPlan := selectVideoEncoder(opts.FFmpegPath, baseVideoFilter, gopArg, opts.HLSTimeSeconds, opts.LogOutput, debugEnabled)
 
-	audioSource := stream.Audio
+	videoInput := io.ReadCloser(captureStream)
+	if runtime.GOOS == "linux" {
+		videoInput, err = newFramePacer(captureStream, fps)
+		if err != nil {
+			_ = captureStream.Close()
+			_ = os.RemoveAll(tempDir)
+			return nil, fmt.Errorf("screencast pacer: %w", err)
+		}
+	}
+
+	audioSource := captureStream.Audio
 	ownAudioSource := false
 	if opts.IncludeAudio && audioSource == nil {
 		audioSource = newSilencePCMReader(48000, 2, 16, 20*time.Millisecond)
@@ -140,7 +148,7 @@ func Start(options *Options) (*Session, error) {
 			if ownAudioSource && audioSource != nil {
 				_ = audioSource.Close()
 			}
-			_ = stream.Close()
+			_ = videoInput.Close()
 			_ = os.RemoveAll(tempDir)
 			return nil, fmt.Errorf("screencast audio listener: %w", err)
 		}
@@ -173,8 +181,8 @@ func Start(options *Options) (*Session, error) {
 		"-analyzeduration", "0",
 		"-thread_queue_size", strconv.Itoa(opts.VideoQueueSize),
 		"-f", "rawvideo",
-		"-pix_fmt", strings.ToLower(stream.PixelFormat),
-		"-s", fmt.Sprintf("%dx%d", stream.Width, stream.Height),
+		"-pix_fmt", strings.ToLower(captureStream.PixelFormat),
+		"-s", fmt.Sprintf("%dx%d", captureStream.Width, captureStream.Height),
 		"-r", fpsArg,
 		"-i", "pipe:0",
 	)
@@ -237,7 +245,7 @@ func Start(options *Options) (*Session, error) {
 	}
 
 	cmd := exec.Command(opts.FFmpegPath, args...)
-	cmd.Stdin = stream
+	cmd.Stdin = videoInput
 	cmd.Stderr = stderrWriter
 	processutil.HideConsoleWindow(cmd)
 	if err := cmd.Start(); err != nil {
@@ -247,14 +255,14 @@ func Start(options *Options) (*Session, error) {
 		if ownAudioSource && audioSource != nil {
 			_ = audioSource.Close()
 		}
-		_ = stream.Close()
+		_ = videoInput.Close()
 		_ = os.RemoveAll(tempDir)
 		return nil, fmt.Errorf("screencast ffmpeg start: %w", err)
 	}
 
 	s := &Session{
 		dir:        tempDir,
-		stream:     stream,
+		stream:     videoInput,
 		audioSrc:   audioSource,
 		ownAudio:   ownAudioSource,
 		cmd:        cmd,
@@ -422,10 +430,6 @@ func normalizeOptions(options *Options) (*Options, error) {
 }
 
 func targetFPS(stream *capture.Stream) uint32 {
-	return targetFPSForPlatform(runtime.GOOS, stream)
-}
-
-func targetFPSForPlatform(goos string, stream *capture.Stream) uint32 {
 	frameRate := stream.FrameRate
 	if frameRate == 0 {
 		frameRate = defaultMaxFrameRate
@@ -437,14 +441,6 @@ func targetFPSForPlatform(goos string, stream *capture.Stream) uint32 {
 	}
 	if stream.Width*stream.Height > 1920*1080 && target > defaultHighResCapFPS {
 		target = defaultHighResCapFPS
-	}
-	if goos == "linux" {
-		pixels := uint64(stream.Width) * uint64(stream.Height)
-		if pixels >= 3840*2160 && target > defaultLinux4KCapFPS {
-			target = defaultLinux4KCapFPS
-		} else if pixels > 1920*1080 && target > defaultLinux1440pCapFPS {
-			target = defaultLinux1440pCapFPS
-		}
 	}
 
 	return target
