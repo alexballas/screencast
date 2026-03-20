@@ -142,13 +142,16 @@ func open(options *Options) (*Stream, error) {
 	if options.IncludeAudio {
 		audioStream, err = pipewire.NewAudioStream()
 		if err != nil {
-			captureDebugf("platform=linux pipewire_new_audio_stream_failed err=%v", err)
-			pwStream.Close()
-			return nil, err
+			// Sandboxed environments like Flatpak may allow video capture via the
+			// portal-provided remote FD while blocking a direct PipeWire daemon
+			// connection for system audio. Keep the screencast alive and let the
+			// HLS layer inject silence if audio remains unavailable.
+			captureDebugf("platform=linux pipewire_new_audio_stream_failed err=%v falling_back=video_only", err)
+		} else {
+			audioStream.Start()
+			audioReader = audioStream
+			captureDebugf("platform=linux audio_ready")
 		}
-		audioStream.Start()
-		audioReader = audioStream
-		captureDebugf("platform=linux audio_ready")
 	}
 
 	reader := &linuxReadCloser{
