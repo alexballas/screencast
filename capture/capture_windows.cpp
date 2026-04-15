@@ -8,9 +8,10 @@
 #include <windows.graphics.capture.interop.h>
 #if __has_include(<windows.graphics.directx.direct3d11.interop.h>)
 #include <windows.graphics.directx.direct3d11.interop.h>
+using WinDirect3DDxgiInterfaceAccess = ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess;
 #else
 // MinGW/MSYS2 package lag: this header may be missing. Keep equivalent declarations local.
-struct IDirect3DDxgiInterfaceAccess : IUnknown {
+struct WinDirect3DDxgiInterfaceAccess : IUnknown {
 	virtual HRESULT STDMETHODCALLTYPE GetInterface(REFIID id, void **object) = 0;
 };
 
@@ -26,10 +27,9 @@ extern "C" HRESULT __stdcall CreateDirect3D11SurfaceFromDXGISurface(IUnknown *dx
 #include <mutex>
 #include <vector>
 
-using namespace winrt;
-using namespace Windows::Graphics::Capture;
-using namespace Windows::Graphics::DirectX;
-using namespace Windows::Graphics::DirectX::Direct3D11;
+namespace wgc = winrt::Windows::Graphics::Capture;
+namespace wgdx = winrt::Windows::Graphics::DirectX;
+namespace wgdxd3d11 = winrt::Windows::Graphics::DirectX::Direct3D11;
 
 // Required for COM interfaces
 #pragma comment(lib, "windowsapp")
@@ -47,10 +47,10 @@ struct WinCaptureSession {
     
     winrt::com_ptr<ID3D11Device> d3dDevice;
     winrt::com_ptr<ID3D11DeviceContext> d3dContext;
-    IDirect3DDevice device{nullptr};
-    GraphicsCaptureItem item{nullptr};
-    Direct3D11CaptureFramePool framePool{nullptr};
-    GraphicsCaptureSession session{nullptr};
+    wgdxd3d11::IDirect3DDevice device{nullptr};
+    wgc::GraphicsCaptureItem item{nullptr};
+    wgdxd3d11::Direct3D11CaptureFramePool framePool{nullptr};
+    wgc::GraphicsCaptureSession session{nullptr};
     std::atomic<uint32_t> frameCallbacksInFlight{0};
     HANDLE frameCallbacksDrained{nullptr};
     winrt::event_token frameArrivedToken{};
@@ -120,7 +120,7 @@ static inline auto CreateDirect3DDevice(ID3D11Device* d3dDevice) {
     d3dDevice->QueryInterface(__uuidof(IDXGIDevice), dxgiDevice.put_void());
     winrt::com_ptr<::IInspectable> device;
     CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.get(), device.put());
-    return device.as<IDirect3DDevice>();
+    return device.as<wgdxd3d11::IDirect3DDevice>();
 }
 
 // Enumerate monitors helper
@@ -255,7 +255,7 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
     HMONITOR targetMonitor = monitors.empty() ? nullptr : monitors[streamIndex].hMonitor;
     
     // Create GraphicsCaptureItem for monitor
-    auto factory = winrt::get_activation_factory<GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
+    auto factory = winrt::get_activation_factory<wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
     winrt::com_ptr<::IInspectable> itemInterop;
     HRESULT hr = factory->CreateForMonitor(targetMonitor, winrt::guid_of<ABI::Windows::Graphics::Capture::IGraphicsCaptureItem>(), itemInterop.put_void());
     if (FAILED(hr)) {
@@ -263,14 +263,14 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
         return nullptr;
     }
     
-    sess->item = itemInterop.as<GraphicsCaptureItem>();
+    sess->item = itemInterop.as<wgc::GraphicsCaptureItem>();
     sess->d3dDevice = CreateD3DDevice();
     sess->d3dDevice->GetImmediateContext(sess->d3dContext.put());
     sess->device = CreateDirect3DDevice(sess->d3dDevice.get());
     
-    sess->framePool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+    sess->framePool = wgdxd3d11::Direct3D11CaptureFramePool::CreateFreeThreaded(
         sess->device,
-        DirectXPixelFormat::B8G8R8A8UIntNormalized,
+        wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,
         1,
         sess->item.Size());
         
@@ -286,7 +286,7 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
         
         winrt::com_ptr<ID3D11Texture2D> surfaceTexture;
         auto surfaceUnknown = frame.Surface().template as<::IUnknown>();
-        winrt::com_ptr<IDirect3DDxgiInterfaceAccess> surfaceInterop;
+        winrt::com_ptr<WinDirect3DDxgiInterfaceAccess> surfaceInterop;
         constexpr GUID kDirect3DDxgiInterfaceAccessIID = {0xA9B3D012, 0x3DF2, 0x4EE3, {0xB8, 0xD1, 0x86, 0x95, 0xF4, 0x57, 0xD3, 0xC1}};
         if (FAILED(surfaceUnknown->QueryInterface(kDirect3DDxgiInterfaceAccessIID, surfaceInterop.put_void()))) {
             return;
