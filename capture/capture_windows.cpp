@@ -49,7 +49,7 @@ struct WinCaptureSession {
     winrt::com_ptr<ID3D11DeviceContext> d3dContext;
     wgdxd3d11::IDirect3DDevice device{nullptr};
     wgc::GraphicsCaptureItem item{nullptr};
-    wgdxd3d11::Direct3D11CaptureFramePool framePool{nullptr};
+    wgc::Direct3D11CaptureFramePool framePool{nullptr};
     wgc::GraphicsCaptureSession session{nullptr};
     std::atomic<uint32_t> frameCallbacksInFlight{0};
     HANDLE frameCallbacksDrained{nullptr};
@@ -268,7 +268,7 @@ void* InitWinCapture(int id, int streamIndex, bool includeAudio, WinVideoFrameCa
     sess->d3dDevice->GetImmediateContext(sess->d3dContext.put());
     sess->device = CreateDirect3DDevice(sess->d3dDevice.get());
     
-    sess->framePool = wgdxd3d11::Direct3D11CaptureFramePool::CreateFreeThreaded(
+    sess->framePool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
         sess->device,
         wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,
         1,
