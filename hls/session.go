@@ -29,7 +29,9 @@ const (
 	defaultVideoQueueSize  = 2048
 	defaultAudioQueueSize  = 8192
 	defaultAudioChunkSize  = 4096
-	defaultAudioRelayQueue = 384
+	// ~0.7s of jitter slack. Anything deeper just delays the moment the relay
+	// notices it is behind the wall clock.
+	defaultAudioRelayQueue = 32
 	defaultHLSTimeSeconds  = 1
 	defaultHLSListSize     = 24
 )
@@ -56,6 +58,8 @@ type Session struct {
 	dir        string
 	stream     io.ReadCloser
 	audioSrc   io.ReadCloser
+	audioPump  *audioPump
+	skew       *timelineSkew
 	ownAudio   bool
 	cmd        *exec.Cmd
 	audioL     net.Listener
@@ -63,6 +67,10 @@ type Session struct {
 	stderr     *lockedBuffer
 	closeOnce  sync.Once
 }
+
+// openCapture is capture.Open behind a seam, so tests can drive Start with a
+// synthetic frame source instead of the real screen.
+var openCapture = capture.Open
 
 func Start(options *Options) (*Session, error) {
 	opts, err := normalizeOptions(options)
@@ -78,7 +86,7 @@ func Start(options *Options) (*Session, error) {
 
 	cleanupOldTempDirs(opts.TempDirPrefix, 12*time.Hour)
 
-	captureStream, err := capture.Open(&capture.Options{
+	captureStream, err := openCapture(&capture.Options{
 		StreamIndex:  opts.StreamIndex,
 		IncludeAudio: opts.IncludeAudio,
 	})
@@ -116,14 +124,16 @@ func Start(options *Options) (*Session, error) {
 	)
 	encoderPlan := selectVideoEncoder(opts.FFmpegPath, baseVideoFilter, gopArg, opts.HLSTimeSeconds, opts.LogOutput, debugEnabled)
 
-	videoInput := io.ReadCloser(captureStream)
-	if runtime.GOOS == "linux" {
-		videoInput, err = newFramePacer(captureStream, fps)
-		if err != nil {
-			_ = captureStream.Close()
-			_ = os.RemoveAll(tempDir)
-			return nil, fmt.Errorf("screencast pacer: %w", err)
-		}
+	// ffmpeg derives rawvideo timestamps from the frame count and -r, so the
+	// video timeline only tracks real time if we actually feed it fps frames per
+	// second. Every backend is damage-driven and delivers fewer, so pace on all
+	// platforms - otherwise video drifts behind the audio without bound.
+	skew := &timelineSkew{}
+	videoInput, err := newFramePacer(captureStream, fps, skew)
+	if err != nil {
+		_ = captureStream.Close()
+		_ = os.RemoveAll(tempDir)
+		return nil, fmt.Errorf("screencast pacer: %w", err)
 	}
 
 	audioSource := captureStream.Audio
@@ -141,7 +151,10 @@ func Start(options *Options) (*Session, error) {
 
 	audioEnabled := opts.IncludeAudio && audioSource != nil
 	audioURL := ""
-	var audioL net.Listener
+	var (
+		audioL net.Listener
+		pump   *audioPump
+	)
 	if audioEnabled {
 		audioL, err = net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -153,15 +166,32 @@ func Start(options *Options) (*Session, error) {
 			return nil, fmt.Errorf("screencast audio listener: %w", err)
 		}
 
-		go func(l net.Listener, audio io.ReadCloser) {
+		// Drain the capture source now, not on accept: audio produced while we
+		// probe encoders and spawn ffmpeg is pre-roll, and ffmpeg would stamp it
+		// from byte zero - a permanent audio-behind-video offset.
+		pump = startAudioPump(audioSource, opts.AudioChunkSize, opts.AudioRelayQueue)
+
+		go func(l net.Listener, pump *audioPump) {
 			defer l.Close()
 			conn, acceptErr := l.Accept()
 			if acceptErr != nil {
 				return
 			}
 			defer conn.Close()
-			relayAudioWithDrop(conn, audio, opts.AudioChunkSize, opts.AudioRelayQueue)
-		}(audioL, audioSource)
+			// Load-bearing, not debug bookkeeping: everything queued before this
+			// point is pre-roll ffmpeg would stamp from byte zero, putting the
+			// audio track behind the video by the spawn and probe time for the
+			// rest of the session.
+			dropped := pump.discardBuffered()
+			if debugEnabled {
+				envDebugPrintf(
+					"screencast/hls audio_preroll_dropped bytes=%d approx_ms=%d",
+					dropped,
+					int64(dropped)*1000/audioBytesPerSecond,
+				)
+			}
+			pump.relay(conn, skew)
+		}(audioL, pump)
 
 		audioURL = fmt.Sprintf("tcp://%s", audioL.Addr().String())
 		if opts.LogOutput != nil {
@@ -189,6 +219,7 @@ func Start(options *Options) (*Session, error) {
 	if audioEnabled {
 		args = append(args,
 			"-thread_queue_size", strconv.Itoa(opts.AudioQueueSize),
+			"-fflags", "nobuffer",
 			"-probesize", "32",
 			"-analyzeduration", "0",
 			"-f", "s16le",
@@ -252,6 +283,7 @@ func Start(options *Options) (*Session, error) {
 		if audioL != nil {
 			_ = audioL.Close()
 		}
+		pump.close()
 		if ownAudioSource && audioSource != nil {
 			_ = audioSource.Close()
 		}
@@ -264,6 +296,8 @@ func Start(options *Options) (*Session, error) {
 		dir:        tempDir,
 		stream:     videoInput,
 		audioSrc:   audioSource,
+		audioPump:  pump,
+		skew:       skew,
 		ownAudio:   ownAudioSource,
 		cmd:        cmd,
 		audioL:     audioL,
@@ -303,6 +337,18 @@ func (s *Session) Done() <-chan error {
 	return s.ffmpegDone
 }
 
+// DroppedFrames reports how many video frames the pacer gave up on because
+// ffmpeg could not keep up. Audio is shortened to match, so the stream stays in
+// sync, but the wall clock does not: a count that keeps climbing means the
+// capture is too big or too fast for this machine and the caller should lower
+// the frame rate or resolution.
+func (s *Session) DroppedFrames() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.skew.droppedFrames()
+}
+
 func (s *Session) StderrTail(n int) string {
 	if s == nil || s.stderr == nil {
 		return ""
@@ -329,6 +375,8 @@ func (s *Session) Close() error {
 		if s.audioL != nil {
 			out = errors.Join(out, s.audioL.Close())
 		}
+
+		s.audioPump.close()
 
 		if s.stream != nil {
 			done := make(chan error, 1)
@@ -576,77 +624,6 @@ func (r *silencePCMReader) Close() error {
 		close(r.closed)
 	})
 	return nil
-}
-
-func relayAudioWithDrop(dst io.Writer, src io.Reader, chunkSize, queueSize int) {
-	if chunkSize <= 0 {
-		chunkSize = defaultAudioChunkSize
-	}
-	if queueSize <= 0 {
-		queueSize = defaultAudioRelayQueue
-	}
-
-	ch := make(chan []byte, queueSize)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		silence := make([]byte, 3840)
-		lastWrite := time.Now().Add(-time.Second)
-		t := time.NewTicker(20 * time.Millisecond)
-		defer t.Stop()
-
-		for {
-			select {
-			case b, ok := <-ch:
-				if !ok {
-					return
-				}
-				if len(b) == 0 {
-					continue
-				}
-				if _, err := dst.Write(b); err != nil {
-					return
-				}
-				lastWrite = time.Now()
-			case <-t.C:
-				if time.Since(lastWrite) < 40*time.Millisecond {
-					continue
-				}
-				if _, err := dst.Write(silence); err != nil {
-					return
-				}
-				lastWrite = time.Now()
-			}
-		}
-	}()
-
-	buf := make([]byte, chunkSize)
-	for {
-		n, err := src.Read(buf)
-		if n > 0 {
-			b := make([]byte, n)
-			copy(b, buf[:n])
-			select {
-			case ch <- b:
-			default:
-				select {
-				case <-ch:
-				default:
-				}
-				select {
-				case ch <- b:
-				default:
-				}
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
-
-	close(ch)
-	wg.Wait()
 }
 
 func cleanupOldTempDirs(prefix string, maxAge time.Duration) {

@@ -210,6 +210,8 @@ Legacy variables still supported:
 - `hls.Session` cleanup is idempotent (`Close()` can be called multiple times safely).
 - If ffmpeg exits unexpectedly, session resources are now auto-cleaned.
 - When audio is requested but platform capture audio is unavailable, HLS injects paced synthetic silence so the audio track remains present.
+- ffmpeg derives timestamps for both raw inputs from byte/frame counts, so both are anchored to the wall clock: video is frame-paced and audio is trimmed/padded to match elapsed real time. Audio captured before ffmpeg attaches is discarded as pre-roll (`SCREENCAST_DEBUG=1` reports `audio_preroll_dropped`).
+- If ffmpeg falls more than a couple of seconds behind, the pacer gives up on the frames it can never emit and the audio relay drops the same span, so the two stay in sync. `Session.DroppedFrames()` reports the running total: a count that keeps climbing means the capture is too big or too fast for the machine, and the caller should lower the frame rate or resolution.
 - Default startup timeout is 60s to reduce transient initialization failures under load.
 - Desktop backends use a first-frame timeout to avoid indefinite startup hangs.
 - For diagnostics after failure, use `Session.StderrTail(n)`.
