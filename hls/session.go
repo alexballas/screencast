@@ -480,10 +480,7 @@ func targetFPS(stream *capture.Stream) uint32 {
 		frameRate = defaultMaxFrameRate
 	}
 
-	target := frameRate
-	if target > defaultMaxFrameRate {
-		target = defaultMaxFrameRate
-	}
+	target := min(frameRate, defaultMaxFrameRate)
 	if stream.Width*stream.Height > 1920*1080 && target > defaultHighResCapFPS {
 		target = defaultHighResCapFPS
 	}
@@ -544,7 +541,7 @@ func playlistReady(path, baseDir string) bool {
 		return false
 	}
 
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue

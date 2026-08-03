@@ -637,10 +637,7 @@ func targetFPS(stream *capture.Stream) uint32 {
 	if frameRate == 0 {
 		frameRate = defaultMaxFrameRate
 	}
-	target := frameRate
-	if target > defaultMaxFrameRate {
-		target = defaultMaxFrameRate
-	}
+	target := min(frameRate, defaultMaxFrameRate)
 	if stream.Width*stream.Height > 1920*1080 && target > defaultHighResCapFPS {
 		target = defaultHighResCapFPS
 	}

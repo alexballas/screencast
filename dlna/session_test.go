@@ -186,7 +186,7 @@ func TestStreamProbeRejectsGarbage(t *testing.T) {
 func TestProbeHandlesMalformedPackets(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	probe := newStreamProbe()
-	for i := 0; i < 4096; i++ {
+	for i := range 4096 {
 		pkt := make([]byte, m2tsPacketSize)
 		if _, err := rng.Read(pkt); err != nil {
 			t.Fatalf("rand read: %v", err)

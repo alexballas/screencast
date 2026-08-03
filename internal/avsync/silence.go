@@ -43,10 +43,7 @@ func (r *SilencePCMReader) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 
-	n := r.chunkBytes
-	if n > len(p) {
-		n = len(p)
-	}
+	n := min(r.chunkBytes, len(p))
 	if n <= 0 {
 		n = len(p)
 	}
