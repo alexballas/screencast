@@ -1,7 +1,6 @@
 package hls
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,6 +16,8 @@ import (
 	"time"
 
 	"go2tv.app/screencast/capture"
+	"go2tv.app/screencast/internal/avsync"
+	"go2tv.app/screencast/internal/ffmpegnc"
 	"go2tv.app/screencast/internal/processutil"
 )
 
@@ -28,10 +29,6 @@ const (
 	defaultHighResCapFPS   = 30
 	defaultVideoQueueSize  = 2048
 	defaultAudioQueueSize  = 8192
-	defaultAudioChunkSize  = 4096
-	// ~0.7s of jitter slack. Anything deeper just delays the moment the relay
-	// notices it is behind the wall clock.
-	defaultAudioRelayQueue = 32
 	defaultHLSTimeSeconds  = 1
 	defaultHLSListSize     = 24
 )
@@ -58,13 +55,13 @@ type Session struct {
 	dir        string
 	stream     io.ReadCloser
 	audioSrc   io.ReadCloser
-	audioPump  *audioPump
-	skew       *timelineSkew
+	audioPump  *avsync.Pump
+	skew       *avsync.Skew
 	ownAudio   bool
 	cmd        *exec.Cmd
 	audioL     net.Listener
 	ffmpegDone chan error
-	stderr     *lockedBuffer
+	stderr     *avsync.LockedBuffer
 	closeOnce  sync.Once
 }
 
@@ -122,14 +119,14 @@ func Start(options *Options) (*Session, error) {
 		"fps=%s,scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
 		fpsArg,
 	)
-	encoderPlan := selectVideoEncoder(opts.FFmpegPath, baseVideoFilter, gopArg, opts.HLSTimeSeconds, opts.LogOutput, debugEnabled)
+	encoderPlan := ffmpegnc.SelectVideoEncoder(opts.FFmpegPath, baseVideoFilter, gopArg, opts.HLSTimeSeconds, opts.LogOutput, debugEnabled)
 
 	// ffmpeg derives rawvideo timestamps from the frame count and -r, so the
 	// video timeline only tracks real time if we actually feed it fps frames per
 	// second. Every backend is damage-driven and delivers fewer, so pace on all
 	// platforms - otherwise video drifts behind the audio without bound.
-	skew := &timelineSkew{}
-	videoInput, err := newFramePacer(captureStream, fps, skew)
+	skew := avsync.NewSkew()
+	videoInput, err := avsync.NewPacer(captureStream, fps, skew)
 	if err != nil {
 		_ = captureStream.Close()
 		_ = os.RemoveAll(tempDir)
@@ -139,7 +136,7 @@ func Start(options *Options) (*Session, error) {
 	audioSource := captureStream.Audio
 	ownAudioSource := false
 	if opts.IncludeAudio && audioSource == nil {
-		audioSource = newSilencePCMReader(48000, 2, 16, 20*time.Millisecond)
+		audioSource = avsync.NewSilencePCMReader(48000, 2, 16, 20*time.Millisecond)
 		ownAudioSource = true
 		if opts.LogOutput != nil {
 			_, _ = fmt.Fprintln(opts.LogOutput, "screencast audio source: synthetic_silence")
@@ -153,7 +150,7 @@ func Start(options *Options) (*Session, error) {
 	audioURL := ""
 	var (
 		audioL net.Listener
-		pump   *audioPump
+		pump   *avsync.Pump
 	)
 	if audioEnabled {
 		audioL, err = net.Listen("tcp", "127.0.0.1:0")
@@ -169,9 +166,9 @@ func Start(options *Options) (*Session, error) {
 		// Drain the capture source now, not on accept: audio produced while we
 		// probe encoders and spawn ffmpeg is pre-roll, and ffmpeg would stamp it
 		// from byte zero - a permanent audio-behind-video offset.
-		pump = startAudioPump(audioSource, opts.AudioChunkSize, opts.AudioRelayQueue)
+		pump = avsync.StartPump(audioSource, opts.AudioChunkSize, opts.AudioRelayQueue)
 
-		go func(l net.Listener, pump *audioPump) {
+		go func(l net.Listener, pump *avsync.Pump) {
 			defer l.Close()
 			conn, acceptErr := l.Accept()
 			if acceptErr != nil {
@@ -182,15 +179,15 @@ func Start(options *Options) (*Session, error) {
 			// point is pre-roll ffmpeg would stamp from byte zero, putting the
 			// audio track behind the video by the spawn and probe time for the
 			// rest of the session.
-			dropped := pump.discardBuffered()
+			dropped := pump.DiscardBuffered()
 			if debugEnabled {
 				envDebugPrintf(
 					"screencast/hls audio_preroll_dropped bytes=%d approx_ms=%d",
 					dropped,
-					int64(dropped)*1000/audioBytesPerSecond,
+					int64(dropped)*1000/avsync.AudioBytesPerSecond,
 				)
 			}
-			pump.relay(conn, skew)
+			pump.Relay(conn, skew)
 		}(audioL, pump)
 
 		audioURL = fmt.Sprintf("tcp://%s", audioL.Addr().String())
@@ -203,7 +200,7 @@ func Start(options *Options) (*Session, error) {
 	if debugEnabled {
 		args = append(args, "-loglevel", "debug")
 	}
-	args = append(args, encoderPlan.globalArgs...)
+	args = append(args, encoderPlan.GlobalArgs...)
 	args = append(args,
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
@@ -239,10 +236,10 @@ func Start(options *Options) (*Session, error) {
 	args = append(args,
 		"-r", fpsArg,
 	)
-	if strings.TrimSpace(encoderPlan.videoFilter) != "" {
-		args = append(args, "-vf", encoderPlan.videoFilter)
+	if strings.TrimSpace(encoderPlan.VideoFilter) != "" {
+		args = append(args, "-vf", encoderPlan.VideoFilter)
 	}
-	args = append(args, encoderPlan.codecArgs...)
+	args = append(args, encoderPlan.CodecArgs...)
 	if audioEnabled {
 		args = append(args,
 			"-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
@@ -262,7 +259,7 @@ func Start(options *Options) (*Session, error) {
 		playlistPath,
 	)
 
-	stderrBuf := &lockedBuffer{}
+	stderrBuf := avsync.NewLockedBuffer()
 	stderrWriter := io.Writer(stderrBuf)
 	if opts.LogOutput != nil {
 		stderrWriter = io.MultiWriter(opts.LogOutput, stderrWriter)
@@ -283,7 +280,7 @@ func Start(options *Options) (*Session, error) {
 		if audioL != nil {
 			_ = audioL.Close()
 		}
-		pump.close()
+		pump.Close()
 		if ownAudioSource && audioSource != nil {
 			_ = audioSource.Close()
 		}
@@ -346,7 +343,7 @@ func (s *Session) DroppedFrames() int64 {
 	if s == nil {
 		return 0
 	}
-	return s.skew.droppedFrames()
+	return s.skew.DroppedFrames()
 }
 
 func (s *Session) StderrTail(n int) string {
@@ -376,7 +373,7 @@ func (s *Session) Close() error {
 			out = errors.Join(out, s.audioL.Close())
 		}
 
-		s.audioPump.close()
+		s.audioPump.Close()
 
 		if s.stream != nil {
 			done := make(chan error, 1)
@@ -458,7 +455,7 @@ func normalizeOptions(options *Options) (*Options, error) {
 		opts.AudioQueueSize = 32768
 	}
 	if opts.AudioChunkSize == 0 {
-		opts.AudioChunkSize = defaultAudioChunkSize
+		opts.AudioChunkSize = avsync.DefaultChunkSize
 	} else if opts.AudioChunkSize < 512 {
 		opts.AudioChunkSize = 512
 	}
@@ -466,7 +463,7 @@ func normalizeOptions(options *Options) (*Options, error) {
 		opts.AudioChunkSize = 32768
 	}
 	if opts.AudioRelayQueue == 0 {
-		opts.AudioRelayQueue = defaultAudioRelayQueue
+		opts.AudioRelayQueue = avsync.DefaultRelayQueue
 	} else if opts.AudioRelayQueue < 8 {
 		opts.AudioRelayQueue = 8
 	}
@@ -494,7 +491,7 @@ func targetFPS(stream *capture.Stream) uint32 {
 	return target
 }
 
-func waitForPlaylistReady(path, baseDir string, timeout time.Duration, ffmpegDone <-chan error, ffmpegStderr *lockedBuffer) error {
+func waitForPlaylistReady(path, baseDir string, timeout time.Duration, ffmpegDone <-chan error, ffmpegStderr *avsync.LockedBuffer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -563,69 +560,6 @@ func playlistReady(path, baseDir string) bool {
 	return false
 }
 
-type silencePCMReader struct {
-	bytesPerSecond int
-	chunkBytes     int
-	closed         chan struct{}
-	closeOnce      sync.Once
-}
-
-func newSilencePCMReader(sampleRate, channels, bitsPerSample int, chunkDuration time.Duration) io.ReadCloser {
-	bytesPerSecond := sampleRate * channels * (bitsPerSample / 8)
-	if bytesPerSecond <= 0 {
-		bytesPerSecond = 48000 * 2 * 2
-	}
-	chunkBytes := int((int64(bytesPerSecond) * chunkDuration.Milliseconds()) / 1000)
-	if chunkBytes <= 0 {
-		chunkBytes = 3840
-	}
-	return &silencePCMReader{
-		bytesPerSecond: bytesPerSecond,
-		chunkBytes:     chunkBytes,
-		closed:         make(chan struct{}),
-	}
-}
-
-func (r *silencePCMReader) Read(p []byte) (int, error) {
-	select {
-	case <-r.closed:
-		return 0, io.EOF
-	default:
-	}
-	if len(p) == 0 {
-		return 0, nil
-	}
-
-	n := r.chunkBytes
-	if n > len(p) {
-		n = len(p)
-	}
-	if n <= 0 {
-		n = len(p)
-	}
-	clear(p[:n])
-
-	wait := time.Duration(int64(n) * int64(time.Second) / int64(r.bytesPerSecond))
-	if wait <= 0 {
-		return n, nil
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case <-r.closed:
-		return 0, io.EOF
-	case <-timer.C:
-		return n, nil
-	}
-}
-
-func (r *silencePCMReader) Close() error {
-	r.closeOnce.Do(func() {
-		close(r.closed)
-	})
-	return nil
-}
-
 func cleanupOldTempDirs(prefix string, maxAge time.Duration) {
 	if prefix == "" {
 		prefix = defaultTempDirPrefix
@@ -647,29 +581,4 @@ func cleanupOldTempDirs(prefix string, maxAge time.Duration) {
 		}
 		_ = os.RemoveAll(dir)
 	}
-}
-
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) Tail(n int) string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	s := strings.TrimSpace(b.buf.String())
-	if s == "" {
-		return "no ffmpeg stderr output"
-	}
-	if len(s) <= n {
-		return s
-	}
-	return s[len(s)-n:]
 }
