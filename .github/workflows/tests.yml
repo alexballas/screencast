@@ -1,0 +1,94 @@
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: go test (ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # pkg-config and libpipewire-0.3-dev are cgo build requirements for the
+      # Linux capture backend. ffmpeg ships both ffmpeg and ffprobe, which the
+      # end-to-end sync test encodes and measures with.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libpipewire-0.3-dev \
+            ffmpeg
+
+      # The sync test skips itself when the toolchain cannot perform the
+      # measurement. Assert the same requirements here, so a runner image with a
+      # stripped ffmpeg build fails the job instead of quietly passing it.
+      - name: Verify the ffmpeg toolchain
+        run: |
+          ffmpeg -version
+          ffprobe -version
+
+          filters=$(ffmpeg -hide_banner -filters)
+          for name in signalstats astats movie amovie; do
+            case "$filters" in
+              *" $name "*) ;;
+              *) echo "::error::ffmpeg build lacks the $name filter"; exit 1 ;;
+            esac
+          done
+
+          encoders=$(ffmpeg -hide_banner -encoders)
+          for name in libx264 aac; do
+            case "$encoders" in
+              *" $name"*) ;;
+              *) echo "::error::ffmpeg build lacks the $name encoder"; exit 1 ;;
+            esac
+          done
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: |
+          set -o pipefail
+          go test -v -count=1 -timeout 15m ./... 2>&1 | tee test-output.log
+
+      # A skipped test is a test that did not run. The ffmpeg-backed cases skip
+      # themselves rather than fail on machines without the toolchain, so on a
+      # runner that is meant to have it, treat any skip as a broken environment.
+      - name: Confirm every test ran
+        run: |
+          if grep -q -- "--- SKIP" test-output.log; then
+            echo "::error::tests were skipped on a runner expected to run them"
+            grep -- "--- SKIP" test-output.log
+            exit 1
+          fi
+          if ! grep -q -- "--- PASS: TestSessionKeepsCapturedEventInSync" test-output.log; then
+            echo "::error::the end-to-end ffmpeg sync test did not pass"
+            exit 1
+          fi
+
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output
+          path: test-output.log
+          if-no-files-found: ignore
