@@ -265,6 +265,31 @@ func TestFramePacerRecordsAbandonedTimeline(t *testing.T) {
 	}
 }
 
+// The pacer is the only owner of the capture stream once it has one, so it must
+// never hand the stream back as its own return value: the caller would hold two
+// handles to one object with no way to tell they are the same, and teardown has
+// to be correct without knowing which case it is in.
+func TestNewFramePacerRejectsZeroFrameRate(t *testing.T) {
+	srcR, srcW := io.Pipe()
+	t.Cleanup(func() { _ = srcW.Close() })
+
+	stream := &capture.Stream{
+		ReadCloser:  srcR,
+		Width:       2,
+		Height:      1,
+		PixelFormat: capture.PixelFormatBGRA,
+	}
+
+	paced, err := newFramePacer(stream, 0, nil)
+	if err == nil {
+		_ = paced.Close()
+		t.Fatal("newFramePacer() accepted a zero frame rate")
+	}
+	if paced != nil {
+		t.Fatalf("newFramePacer() = %#v on error, want nil: the caller still owns the stream", paced)
+	}
+}
+
 func TestRawFrameSizeBGRA(t *testing.T) {
 	got, err := rawFrameSize(1280, 720, capture.PixelFormatBGRA)
 	if err != nil {

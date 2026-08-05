@@ -97,20 +97,25 @@ type framePacer struct {
 	closeErr  error
 }
 
-func newFramePacer(stream *capture.Stream, fps uint32, skew *timelineSkew) (io.ReadCloser, error) {
+// newFramePacer takes ownership of stream: on success the returned pacer's
+// Close is what closes it, and the caller must not close it as well. On failure
+// ownership stays with the caller.
+//
+// A zero frame rate is an error rather than a request to pass the stream
+// straight back. Handing the same object back as the paced input would make the
+// caller's two handles one, and which of them still owns the stream would then
+// depend on arguments it cannot inspect afterwards.
+func newFramePacer(stream *capture.Stream, fps uint32, skew *timelineSkew) (*framePacer, error) {
 	if stream == nil || stream.ReadCloser == nil {
 		return nil, errors.New("nil stream")
 	}
 	if fps == 0 {
-		return stream, nil
+		return nil, errors.New("frame pacer needs a non-zero frame rate")
 	}
 
 	frameSize, err := rawFrameSize(stream.Width, stream.Height, stream.PixelFormat)
 	if err != nil {
 		return nil, err
-	}
-	if frameSize == 0 {
-		return stream, nil
 	}
 
 	pr, pw := io.Pipe()
