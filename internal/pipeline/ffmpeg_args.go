@@ -6,10 +6,10 @@ import (
 	"strings"
 )
 
-// BaseVideoFilter caps the encode at 720p and holds it to fps, before whatever
+// baseVideoFilter caps the encode at 720p and holds it to fps, before whatever
 // pixel format the selected encoder needs is appended to it. The trunc pair
 // keeps both dimensions even, which H.264 requires.
-func BaseVideoFilter(fpsArg string) string {
+func baseVideoFilter(fpsArg string) string {
 	return fmt.Sprintf(
 		"fps=%s,scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
 		fpsArg,

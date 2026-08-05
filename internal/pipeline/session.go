@@ -35,7 +35,7 @@ type Session struct {
 	prep    *Prepared
 	cmd     *exec.Cmd
 	stdout  io.ReadCloser
-	stderr  *LockedBuffer
+	stderr  *lockedBuffer
 	cleanup func() error
 	done    chan error
 
@@ -49,7 +49,7 @@ func (p *Prepared) Launch(opts LaunchOptions) (*Session, error) {
 	args.MuxerArgs = opts.MuxerArgs
 	full := FFmpegArgs(args)
 
-	stderr := &LockedBuffer{}
+	stderr := &lockedBuffer{}
 	stderrWriter := io.Writer(stderr)
 	if p.cfg.LogOutput != nil {
 		stderrWriter = io.MultiWriter(p.cfg.LogOutput, stderrWriter)

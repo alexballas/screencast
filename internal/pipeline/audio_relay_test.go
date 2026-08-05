@@ -84,7 +84,7 @@ func TestAudioPumpDiscardsPreroll(t *testing.T) {
 	pr, pw := io.Pipe()
 
 	pump := startAudioPump(pr, DefaultAudioChunkSize, DefaultAudioRelayQueue)
-	defer pump.Close()
+	defer pump.close()
 
 	preroll := make([]byte, audioBytesFor(500*time.Millisecond))
 	go func() {
@@ -117,7 +117,7 @@ func TestAudioPumpEmitsWholePCMFrames(t *testing.T) {
 	src := &oddSizedReader{sizes: []int{1, 3, 7, 13, 5, 2, 9}, total: 4000}
 
 	pump := startAudioPump(src, DefaultAudioChunkSize, DefaultAudioRelayQueue)
-	defer pump.Close()
+	defer pump.close()
 
 	got := 0
 	deadline := time.Now().Add(2 * time.Second)
@@ -180,7 +180,7 @@ func TestAudioRelayShortensClockByAbandonedVideo(t *testing.T) {
 	floodPCM(t, pw)
 
 	pump := startAudioPump(pr, DefaultAudioChunkSize, DefaultAudioRelayQueue)
-	skew := &TimelineSkew{}
+	skew := &timelineSkew{}
 	dst := &countingWriter{}
 
 	done := make(chan struct{})
@@ -192,7 +192,7 @@ func TestAudioRelayShortensClockByAbandonedVideo(t *testing.T) {
 	time.Sleep(run / 2)
 	skew.drop(12, abandoned) // 12 frames at 60fps
 	time.Sleep(run / 2)
-	pump.Close()
+	pump.close()
 	<-done
 
 	got := int64(dst.total())
@@ -235,7 +235,7 @@ func TestAudioRelayAnchorsToVideoStart(t *testing.T) {
 	floodPCM(t, pw)
 
 	pump := startAudioPump(pr, DefaultAudioChunkSize, DefaultAudioRelayQueue)
-	skew := &TimelineSkew{}
+	skew := &timelineSkew{}
 	// ffmpeg took the first video frame anchorLag ago; the audio input is only
 	// being connected now.
 	skew.markStart(time.Now().Add(-anchorLag))
@@ -248,7 +248,7 @@ func TestAudioRelayAnchorsToVideoStart(t *testing.T) {
 	}()
 
 	time.Sleep(run)
-	pump.Close()
+	pump.close()
 	<-done
 
 	got := int64(dst.total())
@@ -357,7 +357,7 @@ func TestAudioRelayTracksWallClock(t *testing.T) {
 			}()
 
 			time.Sleep(run)
-			pump.Close()
+			pump.close()
 			<-done
 
 			got := int64(dst.total())

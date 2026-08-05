@@ -47,9 +47,9 @@ func DebugPrintf(format string, args ...any) {
 	debugLogger.Printf(format, args...)
 }
 
-// MergeDebugWriter tees w to the debug log, so a caller's own log output also
+// mergeDebugWriter tees w to the debug log, so a caller's own log output also
 // lands next to the ffmpeg diagnostics.
-func MergeDebugWriter(w io.Writer) io.Writer {
+func mergeDebugWriter(w io.Writer) io.Writer {
 	out := envDebugOutput()
 	if w == nil {
 		return out

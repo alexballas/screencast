@@ -13,7 +13,7 @@ import (
 	"go2tv.app/screencast/capture"
 )
 
-// videoCloseTimeout bounds the wait on the video input. FramePacer.Close joins
+// videoCloseTimeout bounds the wait on the video input. framePacer.Close joins
 // the capture backend's Close, and a backend can block there for good; the
 // alternative to giving up on it is a Close that never returns.
 const videoCloseTimeout = 1500 * time.Millisecond
@@ -41,26 +41,26 @@ type Config struct {
 // chosen, the pacer and the audio relay are already draining the backend, and
 // every ffmpeg argument but the muxer's is decided.
 //
-// Draining before ffmpeg exists is deliberate - see AudioPump - so a Prepared
+// Draining before ffmpeg exists is deliberate - see audioPump - so a Prepared
 // that is neither launched nor aborted leaks a capture session and its
 // goroutines. Exactly one of Launch and Abort has to be called on it.
 type Prepared struct {
 	cfg   Config
 	args  FFmpegArgsParams
-	skew  *TimelineSkew
+	skew  *timelineSkew
 	debug bool
 
 	// videoInput owns the capture backend: the stream itself until
-	// NewFramePacer takes it, the pacer afterwards. Unwinding closes this and
+	// newFramePacer takes it, the pacer afterwards. Unwinding closes this and
 	// nothing else, so there is exactly one owner at every point in Prepare.
 	videoInput io.Closer
 	// video is that same pacer as a reader, for ffmpeg's stdin. It is nil until
 	// the pacer exists.
-	video *FramePacer
+	video *framePacer
 
 	audioSrc io.ReadCloser
 	ownAudio bool
-	pump     *AudioPump
+	pump     *audioPump
 	listener net.Listener
 
 	abortOnce sync.Once
@@ -77,12 +77,12 @@ func Prepare(cfg *Config) (*Prepared, error) {
 
 	p := &Prepared{
 		cfg:   *cfg,
-		skew:  &TimelineSkew{},
+		skew:  &timelineSkew{},
 		debug: DebugEnabled(),
 	}
 	if p.debug {
 		// Umbrella debug mode: emit ffmpeg stderr and print the full command.
-		p.cfg.LogOutput = MergeDebugWriter(p.cfg.LogOutput)
+		p.cfg.LogOutput = mergeDebugWriter(p.cfg.LogOutput)
 		p.cfg.DebugCommand = true
 	}
 
@@ -99,7 +99,7 @@ func Prepare(cfg *Config) (*Prepared, error) {
 	}
 	p.videoInput = stream
 
-	fps := TargetFPS(stream)
+	fps := targetFPS(stream)
 	if p.debug {
 		DebugPrintf(
 			"screencast/hls fps_target platform=%s width=%d height=%d source=%d target=%d",
@@ -117,13 +117,13 @@ func Prepare(cfg *Config) (*Prepared, error) {
 	}
 	gopArg := strconv.FormatUint(gopFrames, 10)
 
-	encoderPlan := SelectVideoEncoder(p.cfg.FFmpegPath, BaseVideoFilter(fpsArg), gopArg, p.cfg.GOPSeconds, p.cfg.LogOutput, p.debug)
+	encoderPlan := SelectVideoEncoder(p.cfg.FFmpegPath, baseVideoFilter(fpsArg), gopArg, p.cfg.GOPSeconds, p.cfg.LogOutput, p.debug)
 
 	// ffmpeg derives rawvideo timestamps from the frame count and -r, so the
 	// video timeline only tracks real time if we actually feed it fps frames per
 	// second. Every backend is damage-driven and delivers fewer, so pace on all
 	// platforms - otherwise video drifts behind the audio without bound.
-	video, err := NewFramePacer(stream, fps, p.skew)
+	video, err := newFramePacer(stream, fps, p.skew)
 	if err != nil {
 		_ = p.Abort()
 		return nil, fmt.Errorf("screencast pacer: %w", err)
@@ -132,7 +132,7 @@ func Prepare(cfg *Config) (*Prepared, error) {
 
 	p.audioSrc = stream.Audio
 	if p.cfg.IncludeAudio && p.audioSrc == nil {
-		p.audioSrc = NewSilencePCMReader(48000, 2, 16, 20*time.Millisecond)
+		p.audioSrc = newSilencePCMReader(48000, 2, 16, 20*time.Millisecond)
 		p.ownAudio = true
 		if p.cfg.LogOutput != nil {
 			_, _ = fmt.Fprintln(p.cfg.LogOutput, "screencast audio source: synthetic_silence")
@@ -145,7 +145,7 @@ func Prepare(cfg *Config) (*Prepared, error) {
 	audioEnabled := p.cfg.IncludeAudio && p.audioSrc != nil
 	audioURL := ""
 	if audioEnabled {
-		p.listener, p.pump, audioURL, err = StartAudioRelay(p.audioSrc, p.cfg.AudioChunkSize, p.cfg.AudioRelayQueue, p.skew, p.debug)
+		p.listener, p.pump, audioURL, err = startAudioRelay(p.audioSrc, p.cfg.AudioChunkSize, p.cfg.AudioRelayQueue, p.skew, p.debug)
 		if err != nil {
 			_ = p.Abort()
 			return nil, fmt.Errorf("screencast audio listener: %w", err)
@@ -179,7 +179,7 @@ func Prepare(cfg *Config) (*Prepared, error) {
 //
 // The order is not arbitrary. The pump closes before the capture audio source
 // because closing the source is what releases a producer parked in src.Read -
-// see AudioPump - and the video input's Close is bounded because it joins the
+// see audioPump - and the video input's Close is bounded because it joins the
 // capture backend's.
 func (p *Prepared) Abort() error {
 	if p == nil {
@@ -191,7 +191,7 @@ func (p *Prepared) Abort() error {
 			p.abortErr = errors.Join(p.abortErr, p.listener.Close())
 		}
 
-		p.pump.Close()
+		p.pump.close()
 
 		if p.videoInput != nil {
 			p.abortErr = errors.Join(p.abortErr, closeBounded(p.videoInput))
@@ -209,7 +209,7 @@ func (p *Prepared) DroppedFrames() int64 {
 	if p == nil {
 		return 0
 	}
-	return p.skew.DroppedFrames()
+	return p.skew.droppedFrames()
 }
 
 // closeBounded closes c, giving up on the wait - not on the close - after

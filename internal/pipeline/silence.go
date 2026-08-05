@@ -13,7 +13,7 @@ type silencePCMReader struct {
 	closeOnce      sync.Once
 }
 
-func NewSilencePCMReader(sampleRate, channels, bitsPerSample int, chunkDuration time.Duration) io.ReadCloser {
+func newSilencePCMReader(sampleRate, channels, bitsPerSample int, chunkDuration time.Duration) io.ReadCloser {
 	bytesPerSecond := sampleRate * channels * (bitsPerSample / 8)
 	if bytesPerSecond <= 0 {
 		bytesPerSecond = 48000 * 2 * 2

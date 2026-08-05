@@ -19,7 +19,7 @@ const (
 	maxFrameDebtSeconds = 2
 )
 
-// TimelineSkew is the shared state that keeps the two ffmpeg input timelines
+// timelineSkew is the shared state that keeps the two ffmpeg input timelines
 // describing the same stretch of real time.
 //
 // ffmpeg derives both pts from counts - frames for rawvideo, bytes for s16le -
@@ -37,7 +37,7 @@ const (
 // and every later drop stacks on top. The relay shortens its own clock by
 // whatever lands here, leaving only the trim dead band as residual instead of
 // an unbounded gap.
-type TimelineSkew struct {
+type timelineSkew struct {
 	dropped atomic.Int64 // nanoseconds of timeline abandoned
 	frames  atomic.Int64
 	anchor  atomic.Int64 // UnixNano of video pts 0; 0 until the pacer starts
@@ -46,7 +46,7 @@ type TimelineSkew struct {
 // markStart records the instant the first video frame reached ffmpeg. Only the
 // first call counts: the pacer re-anchors its own clock when it abandons a span,
 // but pts 0 stays where it was and the relay compensates via abandoned instead.
-func (s *TimelineSkew) markStart(t time.Time) {
+func (s *timelineSkew) markStart(t time.Time) {
 	if s == nil {
 		return
 	}
@@ -55,7 +55,7 @@ func (s *TimelineSkew) markStart(t time.Time) {
 
 // startedAt reports the real time video pts 0 corresponds to, or fallback when
 // there is no pacer (tests) or it has not emitted its first frame yet.
-func (s *TimelineSkew) startedAt(fallback time.Time) time.Time {
+func (s *timelineSkew) startedAt(fallback time.Time) time.Time {
 	if s == nil {
 		return fallback
 	}
@@ -65,7 +65,7 @@ func (s *TimelineSkew) startedAt(fallback time.Time) time.Time {
 	return fallback
 }
 
-func (s *TimelineSkew) drop(frames int64, d time.Duration) {
+func (s *timelineSkew) drop(frames int64, d time.Duration) {
 	if s == nil || frames <= 0 {
 		return
 	}
@@ -74,30 +74,30 @@ func (s *TimelineSkew) drop(frames int64, d time.Duration) {
 }
 
 // abandoned reports the total timeline the pacer skipped.
-func (s *TimelineSkew) abandoned() time.Duration {
+func (s *timelineSkew) abandoned() time.Duration {
 	if s == nil {
 		return 0
 	}
 	return time.Duration(s.dropped.Load())
 }
 
-func (s *TimelineSkew) DroppedFrames() int64 {
+func (s *timelineSkew) droppedFrames() int64 {
 	if s == nil {
 		return 0
 	}
 	return s.frames.Load()
 }
 
-type FramePacer struct {
+type framePacer struct {
 	src       io.ReadCloser
 	pr        *io.PipeReader
 	pw        *io.PipeWriter
-	skew      *TimelineSkew
+	skew      *timelineSkew
 	closeOnce sync.Once
 	closeErr  error
 }
 
-// NewFramePacer takes ownership of stream: on success the returned pacer's
+// newFramePacer takes ownership of stream: on success the returned pacer's
 // Close is what closes it, and the caller must not close it as well. On failure
 // ownership stays with the caller.
 //
@@ -105,7 +105,7 @@ type FramePacer struct {
 // straight back. Handing the same object back as the paced input would make the
 // caller's two handles one, and which of them still owns the stream would then
 // depend on arguments it cannot inspect afterwards.
-func NewFramePacer(stream *capture.Stream, fps uint32, skew *TimelineSkew) (*FramePacer, error) {
+func newFramePacer(stream *capture.Stream, fps uint32, skew *timelineSkew) (*framePacer, error) {
 	if stream == nil || stream.ReadCloser == nil {
 		return nil, errors.New("nil stream")
 	}
@@ -119,7 +119,7 @@ func NewFramePacer(stream *capture.Stream, fps uint32, skew *TimelineSkew) (*Fra
 	}
 
 	pr, pw := io.Pipe()
-	p := &FramePacer{
+	p := &framePacer{
 		src:  stream,
 		pr:   pr,
 		pw:   pw,
@@ -157,18 +157,18 @@ func rawFrameSize(width, height uint32, pixelFormat string) (int, error) {
 	}
 }
 
-func (p *FramePacer) Read(buf []byte) (int, error) {
+func (p *framePacer) Read(buf []byte) (int, error) {
 	return p.pr.Read(buf)
 }
 
-func (p *FramePacer) Close() error {
+func (p *framePacer) Close() error {
 	p.closeOnce.Do(func() {
 		p.closeErr = errors.Join(p.src.Close(), p.pw.Close(), p.pr.Close())
 	})
 	return p.closeErr
 }
 
-func (p *FramePacer) run(frameSize int, fps uint32) {
+func (p *framePacer) run(frameSize int, fps uint32) {
 	frameCh := make(chan []byte, 1)
 	srcErrCh := make(chan error, 1)
 
@@ -289,7 +289,7 @@ func (p *FramePacer) run(frameSize int, fps uint32) {
 						skipped,
 						abandoned.Round(time.Millisecond),
 						fps,
-						p.skew.DroppedFrames(),
+						p.skew.droppedFrames(),
 					)
 				}
 				start = start.Add(abandoned)

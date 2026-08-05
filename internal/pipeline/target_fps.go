@@ -7,9 +7,9 @@ const (
 	defaultHighResCapFPS = 30
 )
 
-// TargetFPS is the rate the pacer holds the video timeline to: whatever the
+// targetFPS is the rate the pacer holds the video timeline to: whatever the
 // source reports, capped at defaultMaxFrameRate and lowered again above 1080p.
-func TargetFPS(stream *capture.Stream) uint32 {
+func targetFPS(stream *capture.Stream) uint32 {
 	frameRate := stream.FrameRate
 	if frameRate == 0 {
 		frameRate = defaultMaxFrameRate
