@@ -25,10 +25,22 @@ type VideoEncoderPlan struct {
 	CodecArgs   []string
 }
 
-func SelectVideoEncoder(ffmpegPath, baseFilter, gopArg string, hlsTimeSeconds int, logOutput io.Writer, debug bool) VideoEncoderPlan {
-	software := softwareEncoderPlan(baseFilter, gopArg, hlsTimeSeconds)
+// SelectVideoEncoder returns the best encoder plan this machine can actually
+// run: the first hardware candidate that probes clean, or libx264.
+//
+// gopArg and keyframeSeconds are the same keyframe interval expressed twice,
+// and both are the caller's to decide. gopArg is the GOP length in frames,
+// which -g and -keyint_min ask the encoder for; keyframeSeconds pins the
+// keyframes to the timeline instead, via -force_key_frames, so that whatever
+// consumes the output can cut at that interval regardless of what the encoder
+// chose to do about scene changes. What a sensible interval is depends on the
+// output format - a segment length for HLS, something else for a continuous
+// stream - so nothing here assumes one. Seconds below 1 make the expression
+// force a keyframe on every frame; callers normalise their own options.
+func SelectVideoEncoder(ffmpegPath, baseFilter, gopArg string, keyframeSeconds int, logOutput io.Writer, debug bool) VideoEncoderPlan {
+	software := softwareEncoderPlan(baseFilter, gopArg, keyframeSeconds)
 
-	candidates := hardwareEncoderCandidates(baseFilter, gopArg, hlsTimeSeconds)
+	candidates := hardwareEncoderCandidates(baseFilter, gopArg, keyframeSeconds)
 	if len(candidates) == 0 {
 		reportEncoderSelection(logOutput, debug, software, "no_hardware_candidates")
 		return software
@@ -155,37 +167,37 @@ func probeVideoEncoder(ffmpegPath string, plan VideoEncoderPlan) error {
 	return nil
 }
 
-func hardwareEncoderCandidates(baseFilter, gopArg string, hlsTimeSeconds int) []VideoEncoderPlan {
+func hardwareEncoderCandidates(baseFilter, gopArg string, keyframeSeconds int) []VideoEncoderPlan {
 	switch runtime.GOOS {
 	case "darwin":
 		return []VideoEncoderPlan{
-			hardwareEncoderPlan("h264_videotoolbox", "h264_videotoolbox", nil, baseFilter+",format=yuv420p", gopArg, hlsTimeSeconds),
+			hardwareEncoderPlan("h264_videotoolbox", "h264_videotoolbox", nil, baseFilter+",format=yuv420p", gopArg, keyframeSeconds),
 		}
 	case "windows":
 		return []VideoEncoderPlan{
-			hardwareEncoderPlan("h264_nvenc", "h264_nvenc", nil, baseFilter+",format=yuv420p", gopArg, hlsTimeSeconds),
-			hardwareEncoderPlan("h264_amf", "h264_amf", nil, baseFilter+",format=yuv420p", gopArg, hlsTimeSeconds),
-			hardwareEncoderPlan("h264_qsv", "h264_qsv", nil, baseFilter+",format=nv12", gopArg, hlsTimeSeconds),
+			hardwareEncoderPlan("h264_nvenc", "h264_nvenc", nil, baseFilter+",format=yuv420p", gopArg, keyframeSeconds),
+			hardwareEncoderPlan("h264_amf", "h264_amf", nil, baseFilter+",format=yuv420p", gopArg, keyframeSeconds),
+			hardwareEncoderPlan("h264_qsv", "h264_qsv", nil, baseFilter+",format=nv12", gopArg, keyframeSeconds),
 		}
 	default:
 		candidates := []VideoEncoderPlan{
-			hardwareEncoderPlan("h264_nvenc", "h264_nvenc", nil, baseFilter+",format=yuv420p", gopArg, hlsTimeSeconds),
+			hardwareEncoderPlan("h264_nvenc", "h264_nvenc", nil, baseFilter+",format=yuv420p", gopArg, keyframeSeconds),
 		}
 
 		devices, err := filepath.Glob("/dev/dri/renderD*")
 		if err == nil {
 			for _, dev := range devices {
 				label := fmt.Sprintf("h264_vaapi (%s)", dev)
-				candidates = append(candidates, hardwareEncoderPlan("h264_vaapi", label, []string{"-vaapi_device", dev}, baseFilter+",format=nv12,hwupload", gopArg, hlsTimeSeconds))
+				candidates = append(candidates, hardwareEncoderPlan("h264_vaapi", label, []string{"-vaapi_device", dev}, baseFilter+",format=nv12,hwupload", gopArg, keyframeSeconds))
 			}
 		}
 
-		candidates = append(candidates, hardwareEncoderPlan("h264_qsv", "h264_qsv", nil, baseFilter+",format=nv12", gopArg, hlsTimeSeconds))
+		candidates = append(candidates, hardwareEncoderPlan("h264_qsv", "h264_qsv", nil, baseFilter+",format=nv12", gopArg, keyframeSeconds))
 		return candidates
 	}
 }
 
-func hardwareEncoderPlan(codec, label string, globalArgs []string, filter, gopArg string, hlsTimeSeconds int) VideoEncoderPlan {
+func hardwareEncoderPlan(codec, label string, globalArgs []string, filter, gopArg string, keyframeSeconds int) VideoEncoderPlan {
 	return VideoEncoderPlan{
 		Label:       label,
 		Codec:       codec,
@@ -198,12 +210,12 @@ func hardwareEncoderPlan(codec, label string, globalArgs []string, filter, gopAr
 			"-maxrate", "5000k",
 			"-bufsize", "10000k",
 			"-g", gopArg,
-			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", hlsTimeSeconds),
+			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", keyframeSeconds),
 		},
 	}
 }
 
-func softwareEncoderPlan(baseFilter, gopArg string, hlsTimeSeconds int) VideoEncoderPlan {
+func softwareEncoderPlan(baseFilter, gopArg string, keyframeSeconds int) VideoEncoderPlan {
 	return VideoEncoderPlan{
 		Label:       "libx264",
 		Codec:       "libx264",
@@ -220,7 +232,7 @@ func softwareEncoderPlan(baseFilter, gopArg string, hlsTimeSeconds int) VideoEnc
 			"-g", gopArg,
 			"-keyint_min", gopArg,
 			"-sc_threshold", "0",
-			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", hlsTimeSeconds),
+			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", keyframeSeconds),
 		},
 	}
 }

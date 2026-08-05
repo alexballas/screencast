@@ -24,7 +24,10 @@ type Config struct {
 	IncludeAudio bool
 	// StreamIndex selects the display/stream index passed to capture.Open (default 0).
 	StreamIndex int
-	// GOPSeconds is the keyframe interval the encoder plan is built around.
+	// GOPSeconds is the keyframe interval, in seconds. It sets both the GOP
+	// length the encoder is asked for and the interval keyframes are forced at,
+	// so an output format that needs to be splittable gets to say where. Below
+	// 1 is not normalised here - see SelectVideoEncoder.
 	GOPSeconds      int
 	VideoQueueSize  int
 	AudioQueueSize  int
@@ -111,6 +114,8 @@ func Prepare(cfg *Config) (*Prepared, error) {
 		)
 	}
 	fpsArg := strconv.FormatUint(uint64(fps), 10)
+	// The GOP is the caller's interval in frames; the encoder plan forces
+	// keyframes on the same interval in seconds.
 	gopFrames := uint64(fps) * uint64(p.cfg.GOPSeconds)
 	if gopFrames == 0 {
 		gopFrames = uint64(fps)
