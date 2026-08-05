@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"go2tv.app/screencast/internal/pipeline"
 	"go2tv.app/screencast/internal/processutil"
 )
 
@@ -36,7 +37,7 @@ func selectVideoEncoder(ffmpegPath, baseFilter, gopArg string, hlsTimeSeconds in
 
 	if _, err := exec.LookPath(ffmpegPath); err != nil {
 		if debug {
-			envDebugPrintf("screencast/hls encoder_probe ffmpeg_lookup_failed path=%q err=%v", ffmpegPath, err)
+			pipeline.DebugPrintf("screencast/hls encoder_probe ffmpeg_lookup_failed path=%q err=%v", ffmpegPath, err)
 		}
 		reportEncoderSelection(logOutput, debug, software, "ffmpeg_not_found")
 		return software
@@ -44,14 +45,14 @@ func selectVideoEncoder(ffmpegPath, baseFilter, gopArg string, hlsTimeSeconds in
 
 	available, encErr := ffmpegEncoderSet(ffmpegPath)
 	if encErr != nil && debug {
-		envDebugPrintf("screencast/hls encoder_probe ffmpeg_encoders_failed err=%v", encErr)
+		pipeline.DebugPrintf("screencast/hls encoder_probe ffmpeg_encoders_failed err=%v", encErr)
 	}
 
 	for _, candidate := range candidates {
 		if len(available) > 0 {
 			if _, ok := available[candidate.codec]; !ok {
 				if debug {
-					envDebugPrintf("screencast/hls encoder_probe skip encoder=%q reason=not_in_ffmpeg_encoder_list", candidate.label)
+					pipeline.DebugPrintf("screencast/hls encoder_probe skip encoder=%q reason=not_in_ffmpeg_encoder_list", candidate.label)
 				}
 				continue
 			}
@@ -60,7 +61,7 @@ func selectVideoEncoder(ffmpegPath, baseFilter, gopArg string, hlsTimeSeconds in
 			reportEncoderSelection(logOutput, debug, candidate, "")
 			return candidate
 		} else if debug {
-			envDebugPrintf("screencast/hls encoder_probe failed encoder=%q err=%v", candidate.label, err)
+			pipeline.DebugPrintf("screencast/hls encoder_probe failed encoder=%q err=%v", candidate.label, err)
 		}
 	}
 
@@ -109,9 +110,9 @@ func reportEncoderSelection(logOutput io.Writer, debug bool, plan videoEncoderPl
 	}
 	if debug {
 		if reason == "" {
-			envDebugPrintf("screencast/hls encoder selected=%q mode=%s", plan.label, mode)
+			pipeline.DebugPrintf("screencast/hls encoder selected=%q mode=%s", plan.label, mode)
 		} else {
-			envDebugPrintf("screencast/hls encoder selected=%q mode=%s reason=%s", plan.label, mode, reason)
+			pipeline.DebugPrintf("screencast/hls encoder selected=%q mode=%s reason=%s", plan.label, mode, reason)
 		}
 	}
 }

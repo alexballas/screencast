@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"go2tv.app/screencast/capture"
+	"go2tv.app/screencast/internal/pipeline"
 	"go2tv.app/screencast/internal/processutil"
 )
 
@@ -77,10 +78,10 @@ func Start(options *Options) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	debugEnabled := envDebugEnabled()
+	debugEnabled := pipeline.DebugEnabled()
 	if debugEnabled {
 		// Umbrella debug mode: emit ffmpeg stderr and print the full command.
-		opts.LogOutput = mergeDebugWriter(opts.LogOutput)
+		opts.LogOutput = pipeline.MergeDebugWriter(opts.LogOutput)
 		opts.DebugCommand = true
 	}
 
@@ -96,7 +97,7 @@ func Start(options *Options) (*Session, error) {
 
 	fps := targetFPS(captureStream)
 	if debugEnabled {
-		envDebugPrintf(
+		pipeline.DebugPrintf(
 			"screencast/hls fps_target platform=%s width=%d height=%d source=%d target=%d",
 			runtime.GOOS,
 			captureStream.Width,
@@ -145,7 +146,7 @@ func Start(options *Options) (*Session, error) {
 			_, _ = fmt.Fprintln(opts.LogOutput, "screencast audio source: synthetic_silence")
 		}
 		if debugEnabled {
-			envDebugPrintf("screencast/hls audio_source=synthetic_silence")
+			pipeline.DebugPrintf("screencast/hls audio_source=synthetic_silence")
 		}
 	}
 
@@ -184,7 +185,7 @@ func Start(options *Options) (*Session, error) {
 			// rest of the session.
 			dropped := pump.discardBuffered()
 			if debugEnabled {
-				envDebugPrintf(
+				pipeline.DebugPrintf(
 					"screencast/hls audio_preroll_dropped bytes=%d approx_ms=%d",
 					dropped,
 					int64(dropped)*1000/audioBytesPerSecond,
@@ -548,33 +549,33 @@ func waitForPlaylistReady(path, baseDir string, timeout time.Duration, ffmpegDon
 		select {
 		case err := <-ffmpegDone:
 			if err != nil {
-				if envDebugEnabled() {
-					envDebugPrintf("screencast/hls wait_playlist ffmpeg_exit err=%v", err)
+				if pipeline.DebugEnabled() {
+					pipeline.DebugPrintf("screencast/hls wait_playlist ffmpeg_exit err=%v", err)
 				}
 				return fmt.Errorf("screencast ffmpeg exited: %w: %s", err, ffmpegStderr.Tail(300))
 			}
-			if envDebugEnabled() {
-				envDebugPrintf("screencast/hls wait_playlist ffmpeg_exit_without_error")
+			if pipeline.DebugEnabled() {
+				pipeline.DebugPrintf("screencast/hls wait_playlist ffmpeg_exit_without_error")
 			}
 			return errors.New("screencast stream not initialized")
 		case <-ctx.Done():
-			if envDebugEnabled() {
-				envDebugPrintf("screencast/hls wait_playlist timeout=%s stderr_tail=%q", timeout, ffmpegStderr.Tail(300))
+			if pipeline.DebugEnabled() {
+				pipeline.DebugPrintf("screencast/hls wait_playlist timeout=%s stderr_tail=%q", timeout, ffmpegStderr.Tail(300))
 			}
 			return fmt.Errorf("screencast stream not initialized: %s", ffmpegStderr.Tail(300))
 		case <-diagT.C:
-			if envDebugEnabled() {
+			if pipeline.DebugEnabled() {
 				info, err := os.Stat(path)
 				if err != nil {
-					envDebugPrintf("screencast/hls wait_playlist pending playlist=%s stat_err=%q", path, err)
+					pipeline.DebugPrintf("screencast/hls wait_playlist pending playlist=%s stat_err=%q", path, err)
 				} else {
-					envDebugPrintf("screencast/hls wait_playlist pending playlist=%s bytes=%d mtime=%s", path, info.Size(), info.ModTime().Format(time.RFC3339Nano))
+					pipeline.DebugPrintf("screencast/hls wait_playlist pending playlist=%s bytes=%d mtime=%s", path, info.Size(), info.ModTime().Format(time.RFC3339Nano))
 				}
 			}
 		case <-t.C:
 			if playlistReady(path, baseDir) {
-				if envDebugEnabled() {
-					envDebugPrintf("screencast/hls wait_playlist ready playlist=%s", path)
+				if pipeline.DebugEnabled() {
+					pipeline.DebugPrintf("screencast/hls wait_playlist ready playlist=%s", path)
 				}
 				return nil
 			}

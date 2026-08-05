@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"go2tv.app/screencast/internal/pipeline"
 )
 
 type DirectoryHandlerOptions struct {
@@ -38,15 +40,15 @@ func NewDirectoryHandler(dir string, options *DirectoryHandlerOptions) http.Hand
 	if options != nil {
 		opts = *options
 	}
-	if envDebugEnabled() {
+	if pipeline.DebugEnabled() {
 		opts.Debug = true
 		if opts.Logf == nil {
-			opts.Logf = envDebugPrintf
+			opts.Logf = pipeline.DebugPrintf
 		} else {
 			userLogf := opts.Logf
 			opts.Logf = func(format string, args ...any) {
 				userLogf(format, args...)
-				envDebugPrintf(format, args...)
+				pipeline.DebugPrintf(format, args...)
 			}
 		}
 		if opts.LogPrefix == "" {

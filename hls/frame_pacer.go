@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go2tv.app/screencast/capture"
+	"go2tv.app/screencast/internal/pipeline"
 )
 
 const (
@@ -127,8 +128,8 @@ func newFramePacer(stream *capture.Stream, fps uint32, skew *timelineSkew) (*fra
 	}
 
 	go p.run(frameSize, fps)
-	if envDebugEnabled() {
-		envDebugPrintf(
+	if pipeline.DebugEnabled() {
+		pipeline.DebugPrintf(
 			"screencast/hls frame_pacer enabled width=%d height=%d fps=%d frame_bytes=%d",
 			stream.Width,
 			stream.Height,
@@ -283,8 +284,8 @@ func (p *framePacer) run(frameSize int, fps uint32) {
 				skipped := debt - 1
 				abandoned := time.Duration(skipped) * frameInterval
 				p.skew.drop(skipped, abandoned)
-				if envDebugEnabled() {
-					envDebugPrintf(
+				if pipeline.DebugEnabled() {
+					pipeline.DebugPrintf(
 						"screencast/hls frame_pacer overloaded dropped_frames=%d behind=%s fps=%d total_dropped=%d",
 						skipped,
 						abandoned.Round(time.Millisecond),

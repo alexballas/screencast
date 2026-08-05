@@ -1,4 +1,4 @@
-package hls
+package pipeline
 
 import (
 	"fmt"
@@ -9,7 +9,8 @@ import (
 	"sync"
 )
 
-func envDebugEnabled() bool {
+// DebugEnabled reports whether the umbrella SCREENCAST_DEBUG mode is on.
+func DebugEnabled() bool {
 	return strings.TrimSpace(os.Getenv("SCREENCAST_DEBUG")) == "1"
 }
 
@@ -37,14 +38,18 @@ func envDebugOutput() io.Writer {
 	return debugOutput
 }
 
-func envDebugPrintf(format string, args ...any) {
+// DebugPrintf writes one diagnostic line to SCREENCAST_DEBUG_FILE, or to
+// stderr when that is unset.
+func DebugPrintf(format string, args ...any) {
 	debugLoggerOnce.Do(func() {
 		debugLogger = log.New(envDebugOutput(), "", log.LstdFlags|log.Lmicroseconds)
 	})
 	debugLogger.Printf(format, args...)
 }
 
-func mergeDebugWriter(w io.Writer) io.Writer {
+// MergeDebugWriter tees w to the debug log, so a caller's own log output also
+// lands next to the ffmpeg diagnostics.
+func MergeDebugWriter(w io.Writer) io.Writer {
 	out := envDebugOutput()
 	if w == nil {
 		return out
