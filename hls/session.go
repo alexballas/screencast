@@ -119,11 +119,7 @@ func Start(options *Options) (*Session, error) {
 	}
 
 	playlistPath := filepath.Join(tempDir, "playlist.m3u8")
-	baseVideoFilter := fmt.Sprintf(
-		"fps=%s,scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
-		fpsArg,
-	)
-	encoderPlan := selectVideoEncoder(opts.FFmpegPath, baseVideoFilter, gopArg, opts.HLSTimeSeconds, opts.LogOutput, debugEnabled)
+	encoderPlan := selectVideoEncoder(opts.FFmpegPath, baseVideoFilter(fpsArg), gopArg, opts.HLSTimeSeconds, opts.LogOutput, debugEnabled)
 
 	// ffmpeg derives rawvideo timestamps from the frame count and -r, so the
 	// video timeline only tracks real time if we actually feed it fps frames per
@@ -157,7 +153,7 @@ func Start(options *Options) (*Session, error) {
 		pump   *audioPump
 	)
 	if audioEnabled {
-		audioL, err = net.Listen("tcp", "127.0.0.1:0")
+		audioL, pump, audioURL, err = startAudioRelay(audioSource, opts.AudioChunkSize, opts.AudioRelayQueue, skew, debugEnabled)
 		if err != nil {
 			if ownAudioSource && audioSource != nil {
 				_ = audioSource.Close()
@@ -167,34 +163,6 @@ func Start(options *Options) (*Session, error) {
 			return nil, fmt.Errorf("screencast audio listener: %w", err)
 		}
 
-		// Drain the capture source now, not on accept: audio produced while we
-		// probe encoders and spawn ffmpeg is pre-roll, and ffmpeg would stamp it
-		// from byte zero - a permanent audio-behind-video offset.
-		pump = startAudioPump(audioSource, opts.AudioChunkSize, opts.AudioRelayQueue)
-
-		go func(l net.Listener, pump *audioPump) {
-			defer l.Close()
-			conn, acceptErr := l.Accept()
-			if acceptErr != nil {
-				return
-			}
-			defer conn.Close()
-			// Load-bearing, not debug bookkeeping: everything queued before this
-			// point is pre-roll ffmpeg would stamp from byte zero, putting the
-			// audio track behind the video by the spawn and probe time for the
-			// rest of the session.
-			dropped := pump.discardBuffered()
-			if debugEnabled {
-				pipeline.DebugPrintf(
-					"screencast/hls audio_preroll_dropped bytes=%d approx_ms=%d",
-					dropped,
-					int64(dropped)*1000/audioBytesPerSecond,
-				)
-			}
-			pump.relay(conn, skew)
-		}(audioL, pump)
-
-		audioURL = fmt.Sprintf("tcp://%s", audioL.Addr().String())
 		if opts.LogOutput != nil {
 			_, _ = fmt.Fprintf(opts.LogOutput, "screencast audio relay: %s\n", audioURL)
 		}
@@ -273,6 +241,16 @@ func Start(options *Options) (*Session, error) {
 	}
 
 	return s, nil
+}
+
+// baseVideoFilter caps the encode at 720p and holds it to fps, before whatever
+// pixel format the selected encoder needs is appended to it. The trunc pair
+// keeps both dimensions even, which H.264 requires.
+func baseVideoFilter(fpsArg string) string {
+	return fmt.Sprintf(
+		"fps=%s,scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		fpsArg,
+	)
 }
 
 // ffmpegArgsParams is everything the ffmpeg command line is derived from.

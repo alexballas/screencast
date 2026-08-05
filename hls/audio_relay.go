@@ -1,9 +1,13 @@
 package hls
 
 import (
+	"fmt"
 	"io"
+	"net"
 	"sync"
 	"time"
+
+	"go2tv.app/screencast/internal/pipeline"
 )
 
 const (
@@ -91,6 +95,45 @@ func startAudioPump(src io.Reader, chunkSize, queueSize int) *audioPump {
 	}()
 
 	return p
+}
+
+// startAudioRelay opens the loopback socket ffmpeg reads PCM from and starts
+// draining src into it. The URL is what goes on the ffmpeg command line; the
+// listener and the pump are the caller's to close.
+func startAudioRelay(src io.Reader, chunkSize, queueSize int, skew *timelineSkew, debugEnabled bool) (net.Listener, *audioPump, string, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	// Drain the capture source now, not on accept: audio produced while we
+	// probe encoders and spawn ffmpeg is pre-roll, and ffmpeg would stamp it
+	// from byte zero - a permanent audio-behind-video offset.
+	pump := startAudioPump(src, chunkSize, queueSize)
+
+	go func(l net.Listener, pump *audioPump) {
+		defer l.Close()
+		conn, acceptErr := l.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		// Load-bearing, not debug bookkeeping: everything queued before this
+		// point is pre-roll ffmpeg would stamp from byte zero, putting the
+		// audio track behind the video by the spawn and probe time for the
+		// rest of the session.
+		dropped := pump.discardBuffered()
+		if debugEnabled {
+			pipeline.DebugPrintf(
+				"screencast/hls audio_preroll_dropped bytes=%d approx_ms=%d",
+				dropped,
+				int64(dropped)*1000/audioBytesPerSecond,
+			)
+		}
+		pump.relay(conn, skew)
+	}(l, pump)
+
+	return l, pump, fmt.Sprintf("tcp://%s", l.Addr().String()), nil
 }
 
 // offer queues b, dropping the oldest buffer when the reader cannot keep up.
