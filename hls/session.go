@@ -5,19 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"go2tv.app/screencast/capture"
 	"go2tv.app/screencast/internal/pipeline"
-	"go2tv.app/screencast/internal/processutil"
 )
 
 const (
@@ -48,18 +43,12 @@ type Options struct {
 	DebugCommand       bool
 }
 
+// Session is an HLS output on top of a pipeline session: the temp directory
+// the segments and playlist are written into, and the running pipeline that
+// writes them.
 type Session struct {
-	dir        string
-	stream     io.ReadCloser
-	audioSrc   io.ReadCloser
-	audioPump  *pipeline.AudioPump
-	skew       *pipeline.TimelineSkew
-	ownAudio   bool
-	cmd        *exec.Cmd
-	audioL     net.Listener
-	ffmpegDone chan error
-	stderr     *pipeline.LockedBuffer
-	closeOnce  sync.Once
+	dir  string
+	pipe *pipeline.Session
 }
 
 // openCapture is capture.Open behind a seam, so tests can drive Start with a
@@ -71,164 +60,46 @@ func Start(options *Options) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	debugEnabled := pipeline.DebugEnabled()
-	if debugEnabled {
-		// Umbrella debug mode: emit ffmpeg stderr and print the full command.
-		opts.LogOutput = pipeline.MergeDebugWriter(opts.LogOutput)
-		opts.DebugCommand = true
-	}
 
 	cleanupOldTempDirs(opts.TempDirPrefix, 12*time.Hour)
 
-	captureStream, err := openCapture(&capture.Options{
-		StreamIndex:  opts.StreamIndex,
-		IncludeAudio: opts.IncludeAudio,
+	prep, err := pipeline.Prepare(&pipeline.Config{
+		FFmpegPath:      opts.FFmpegPath,
+		IncludeAudio:    opts.IncludeAudio,
+		StreamIndex:     opts.StreamIndex,
+		GOPSeconds:      opts.HLSTimeSeconds,
+		VideoQueueSize:  opts.VideoQueueSize,
+		AudioQueueSize:  opts.AudioQueueSize,
+		AudioChunkSize:  opts.AudioChunkSize,
+		AudioRelayQueue: opts.AudioRelayQueue,
+		LogOutput:       opts.LogOutput,
+		DebugCommand:    opts.DebugCommand,
+		OpenCapture:     openCapture,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("screencast open: %w", err)
+		return nil, err
 	}
 
-	fps := pipeline.TargetFPS(captureStream)
-	if debugEnabled {
-		pipeline.DebugPrintf(
-			"screencast/hls fps_target platform=%s width=%d height=%d source=%d target=%d",
-			runtime.GOOS,
-			captureStream.Width,
-			captureStream.Height,
-			captureStream.FrameRate,
-			fps,
-		)
-	}
-	fpsArg := strconv.FormatUint(uint64(fps), 10)
-	gopFrames := uint64(fps) * uint64(opts.HLSTimeSeconds)
-	if gopFrames == 0 {
-		gopFrames = uint64(fps)
-	}
-	gopArg := strconv.FormatUint(gopFrames, 10)
+	// After the pipeline, not before: the muxer arguments are the only thing
+	// that needs the directory, and a failure here is what the abort path is
+	// for.
 	tempDir, err := os.MkdirTemp("", opts.TempDirPrefix)
 	if err != nil {
-		_ = captureStream.Close()
+		_ = prep.Abort()
 		return nil, fmt.Errorf("screencast temp dir: %w", err)
 	}
 
 	playlistPath := filepath.Join(tempDir, "playlist.m3u8")
-	encoderPlan := pipeline.SelectVideoEncoder(opts.FFmpegPath, pipeline.BaseVideoFilter(fpsArg), gopArg, opts.HLSTimeSeconds, opts.LogOutput, debugEnabled)
-
-	// ffmpeg derives rawvideo timestamps from the frame count and -r, so the
-	// video timeline only tracks real time if we actually feed it fps frames per
-	// second. Every backend is damage-driven and delivers fewer, so pace on all
-	// platforms - otherwise video drifts behind the audio without bound.
-	skew := &pipeline.TimelineSkew{}
-	videoInput, err := pipeline.NewFramePacer(captureStream, fps, skew)
+	pipe, err := prep.Launch(pipeline.LaunchOptions{
+		MuxerArgs: hlsMuxerArgs(opts, tempDir, playlistPath),
+		Cleanup:   func() error { return os.RemoveAll(tempDir) },
+	})
 	if err != nil {
-		_ = captureStream.Close()
-		_ = os.RemoveAll(tempDir)
-		return nil, fmt.Errorf("screencast pacer: %w", err)
+		return nil, err
 	}
 
-	audioSource := captureStream.Audio
-	ownAudioSource := false
-	if opts.IncludeAudio && audioSource == nil {
-		audioSource = pipeline.NewSilencePCMReader(48000, 2, 16, 20*time.Millisecond)
-		ownAudioSource = true
-		if opts.LogOutput != nil {
-			_, _ = fmt.Fprintln(opts.LogOutput, "screencast audio source: synthetic_silence")
-		}
-		if debugEnabled {
-			pipeline.DebugPrintf("screencast/hls audio_source=synthetic_silence")
-		}
-	}
-
-	audioEnabled := opts.IncludeAudio && audioSource != nil
-	audioURL := ""
-	var (
-		audioL net.Listener
-		pump   *pipeline.AudioPump
-	)
-	if audioEnabled {
-		audioL, pump, audioURL, err = pipeline.StartAudioRelay(audioSource, opts.AudioChunkSize, opts.AudioRelayQueue, skew, debugEnabled)
-		if err != nil {
-			if ownAudioSource && audioSource != nil {
-				_ = audioSource.Close()
-			}
-			_ = videoInput.Close()
-			_ = os.RemoveAll(tempDir)
-			return nil, fmt.Errorf("screencast audio listener: %w", err)
-		}
-
-		if opts.LogOutput != nil {
-			_, _ = fmt.Fprintf(opts.LogOutput, "screencast audio relay: %s\n", audioURL)
-		}
-	}
-
-	args := pipeline.FFmpegArgs(pipeline.FFmpegArgsParams{
-		Debug:          debugEnabled,
-		EncoderPlan:    encoderPlan,
-		VideoQueueSize: opts.VideoQueueSize,
-		AudioQueueSize: opts.AudioQueueSize,
-		PixelFormat:    captureStream.PixelFormat,
-		Width:          captureStream.Width,
-		Height:         captureStream.Height,
-		FpsArg:         fpsArg,
-		AudioEnabled:   audioEnabled,
-		AudioURL:       audioURL,
-		MuxerArgs:      hlsMuxerArgs(opts, tempDir, playlistPath),
-	})
-
-	stderrBuf := &pipeline.LockedBuffer{}
-	stderrWriter := io.Writer(stderrBuf)
-	if opts.LogOutput != nil {
-		stderrWriter = io.MultiWriter(opts.LogOutput, stderrWriter)
-	}
-	if opts.DebugCommand {
-		out := opts.LogOutput
-		if out == nil {
-			out = os.Stderr
-		}
-		_, _ = fmt.Fprintf(out, "screencast ffmpeg: %s %s\n", opts.FFmpegPath, strings.Join(args, " "))
-	}
-
-	cmd := exec.Command(opts.FFmpegPath, args...)
-	cmd.Stdin = videoInput
-	cmd.Stderr = stderrWriter
-	processutil.HideConsoleWindow(cmd)
-	if err := cmd.Start(); err != nil {
-		if audioL != nil {
-			_ = audioL.Close()
-		}
-		pump.Close()
-		if ownAudioSource && audioSource != nil {
-			_ = audioSource.Close()
-		}
-		_ = videoInput.Close()
-		_ = os.RemoveAll(tempDir)
-		return nil, fmt.Errorf("screencast ffmpeg start: %w", err)
-	}
-
-	s := &Session{
-		dir:        tempDir,
-		stream:     videoInput,
-		audioSrc:   audioSource,
-		audioPump:  pump,
-		skew:       skew,
-		ownAudio:   ownAudioSource,
-		cmd:        cmd,
-		audioL:     audioL,
-		ffmpegDone: make(chan error, 1),
-		stderr:     stderrBuf,
-	}
-	runtime.SetFinalizer(s, func(sess *Session) {
-		_ = sess.Close()
-	})
-
-	go func(c *exec.Cmd, done chan error) {
-		done <- c.Wait()
-		close(done)
-		// Ensure resources are reclaimed even if caller forgets to Close after ffmpeg exits.
-		_ = s.Close()
-	}(cmd, s.ffmpegDone)
-
-	if err := waitForPlaylistReady(playlistPath, tempDir, opts.StartupTimeout, s.ffmpegDone, s.stderr); err != nil {
+	s := &Session{dir: tempDir, pipe: pipe}
+	if err := waitForPlaylistReady(playlistPath, tempDir, opts.StartupTimeout, pipe); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
@@ -260,7 +131,7 @@ func (s *Session) Done() <-chan error {
 	if s == nil {
 		return nil
 	}
-	return s.ffmpegDone
+	return s.pipe.Done()
 }
 
 // DroppedFrames reports how many video frames the pacer gave up on because
@@ -272,59 +143,24 @@ func (s *Session) DroppedFrames() int64 {
 	if s == nil {
 		return 0
 	}
-	return s.skew.DroppedFrames()
+	return s.pipe.DroppedFrames()
 }
 
 func (s *Session) StderrTail(n int) string {
-	if s == nil || s.stderr == nil {
+	if s == nil {
 		return ""
 	}
-	return s.stderr.Tail(n)
+	return s.pipe.StderrTail(n)
 }
 
+// Close stops the pipeline and removes the segment directory. The removal is
+// the Cleanup hook handed to Launch, so it runs after ffmpeg is dead rather
+// than out from under it.
 func (s *Session) Close() error {
 	if s == nil {
 		return nil
 	}
-
-	var out error
-	s.closeOnce.Do(func() {
-		runtime.SetFinalizer(s, nil)
-
-		if s.cmd != nil && s.cmd.Process != nil {
-			err := s.cmd.Process.Kill()
-			if err != nil && !errors.Is(err, os.ErrProcessDone) {
-				out = errors.Join(out, err)
-			}
-		}
-
-		if s.audioL != nil {
-			out = errors.Join(out, s.audioL.Close())
-		}
-
-		s.audioPump.Close()
-
-		if s.stream != nil {
-			done := make(chan error, 1)
-			go func() {
-				done <- s.stream.Close()
-			}()
-			select {
-			case err := <-done:
-				out = errors.Join(out, err)
-			case <-time.After(1500 * time.Millisecond):
-			}
-		}
-		if s.ownAudio && s.audioSrc != nil {
-			out = errors.Join(out, s.audioSrc.Close())
-		}
-
-		if s.dir != "" {
-			out = errors.Join(out, os.RemoveAll(s.dir))
-		}
-	})
-
-	return out
+	return s.pipe.Close()
 }
 
 func normalizeOptions(options *Options) (*Options, error) {
@@ -403,7 +239,7 @@ func normalizeOptions(options *Options) (*Options, error) {
 	return &opts, nil
 }
 
-func waitForPlaylistReady(path, baseDir string, timeout time.Duration, ffmpegDone <-chan error, ffmpegStderr *pipeline.LockedBuffer) error {
+func waitForPlaylistReady(path, baseDir string, timeout time.Duration, pipe *pipeline.Session) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -414,12 +250,12 @@ func waitForPlaylistReady(path, baseDir string, timeout time.Duration, ffmpegDon
 
 	for {
 		select {
-		case err := <-ffmpegDone:
+		case err := <-pipe.Done():
 			if err != nil {
 				if pipeline.DebugEnabled() {
 					pipeline.DebugPrintf("screencast/hls wait_playlist ffmpeg_exit err=%v", err)
 				}
-				return fmt.Errorf("screencast ffmpeg exited: %w: %s", err, ffmpegStderr.Tail(300))
+				return fmt.Errorf("screencast ffmpeg exited: %w: %s", err, pipe.StderrTail(300))
 			}
 			if pipeline.DebugEnabled() {
 				pipeline.DebugPrintf("screencast/hls wait_playlist ffmpeg_exit_without_error")
@@ -427,9 +263,9 @@ func waitForPlaylistReady(path, baseDir string, timeout time.Duration, ffmpegDon
 			return errors.New("screencast stream not initialized")
 		case <-ctx.Done():
 			if pipeline.DebugEnabled() {
-				pipeline.DebugPrintf("screencast/hls wait_playlist timeout=%s stderr_tail=%q", timeout, ffmpegStderr.Tail(300))
+				pipeline.DebugPrintf("screencast/hls wait_playlist timeout=%s stderr_tail=%q", timeout, pipe.StderrTail(300))
 			}
-			return fmt.Errorf("screencast stream not initialized: %s", ffmpegStderr.Tail(300))
+			return fmt.Errorf("screencast stream not initialized: %s", pipe.StderrTail(300))
 		case <-diagT.C:
 			if pipeline.DebugEnabled() {
 				info, err := os.Stat(path)
