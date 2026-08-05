@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"go2tv.app/screencast/internal/pipeline"
 )
 
 // The argument vector is the whole contract with ffmpeg: input format, pacing,
@@ -26,9 +28,11 @@ func TestFFmpegArgs(t *testing.T) {
 			HLSListSize:        24,
 			HLSDeleteThreshold: 36,
 		}, tempDir, playlistPath)
-		// The plan Start uses whenever no hardware encoder probes clean, which is
-		// every machine without a usable GPU encoder.
-		software = softwareEncoderPlan(baseFilter, "60", 1)
+		// The plan Start uses whenever no hardware encoder probes clean, which
+		// is every machine without a usable GPU encoder. An ffmpeg path that
+		// cannot resolve is the shortest way to that plan without spawning
+		// anything.
+		software = pipeline.SelectVideoEncoder("/path/that/does/not/exist/ffmpeg", baseFilter, "60", 1, nil, false)
 	)
 
 	hlsMuxer := []string{
@@ -166,13 +170,13 @@ func TestFFmpegArgs(t *testing.T) {
 			params: func() ffmpegArgsParams {
 				p := base
 				p.debug = true
-				p.encoderPlan = videoEncoderPlan{
-					label:       "h264_vaapi (/dev/dri/renderD128)",
-					codec:       "h264_vaapi",
-					hardware:    true,
-					globalArgs:  []string{"-vaapi_device", "/dev/dri/renderD128"},
-					videoFilter: baseFilter + ",format=nv12,hwupload",
-					codecArgs:   []string{"-c:v", "h264_vaapi", "-g", "60"},
+				p.encoderPlan = pipeline.VideoEncoderPlan{
+					Label:       "h264_vaapi (/dev/dri/renderD128)",
+					Codec:       "h264_vaapi",
+					Hardware:    true,
+					GlobalArgs:  []string{"-vaapi_device", "/dev/dri/renderD128"},
+					VideoFilter: baseFilter + ",format=nv12,hwupload",
+					CodecArgs:   []string{"-c:v", "h264_vaapi", "-g", "60"},
 				}
 				return p
 			}(),
@@ -211,10 +215,10 @@ func TestFFmpegArgs(t *testing.T) {
 			name: "empty filter",
 			params: func() ffmpegArgsParams {
 				p := base
-				p.encoderPlan = videoEncoderPlan{
-					label:     "libx264",
-					codec:     "libx264",
-					codecArgs: []string{"-c:v", "libx264"},
+				p.encoderPlan = pipeline.VideoEncoderPlan{
+					Label:     "libx264",
+					Codec:     "libx264",
+					CodecArgs: []string{"-c:v", "libx264"},
 				}
 				return p
 			}(),

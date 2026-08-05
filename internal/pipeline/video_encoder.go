@@ -1,4 +1,4 @@
-package hls
+package pipeline
 
 import (
 	"bytes"
@@ -11,22 +11,21 @@ import (
 	"strings"
 	"time"
 
-	"go2tv.app/screencast/internal/pipeline"
 	"go2tv.app/screencast/internal/processutil"
 )
 
 const encoderProbeTimeout = 5 * time.Second
 
-type videoEncoderPlan struct {
-	label       string
-	codec       string
-	hardware    bool
-	globalArgs  []string
-	videoFilter string
-	codecArgs   []string
+type VideoEncoderPlan struct {
+	Label       string
+	Codec       string
+	Hardware    bool
+	GlobalArgs  []string
+	VideoFilter string
+	CodecArgs   []string
 }
 
-func selectVideoEncoder(ffmpegPath, baseFilter, gopArg string, hlsTimeSeconds int, logOutput io.Writer, debug bool) videoEncoderPlan {
+func SelectVideoEncoder(ffmpegPath, baseFilter, gopArg string, hlsTimeSeconds int, logOutput io.Writer, debug bool) VideoEncoderPlan {
 	software := softwareEncoderPlan(baseFilter, gopArg, hlsTimeSeconds)
 
 	candidates := hardwareEncoderCandidates(baseFilter, gopArg, hlsTimeSeconds)
@@ -37,7 +36,7 @@ func selectVideoEncoder(ffmpegPath, baseFilter, gopArg string, hlsTimeSeconds in
 
 	if _, err := exec.LookPath(ffmpegPath); err != nil {
 		if debug {
-			pipeline.DebugPrintf("screencast/hls encoder_probe ffmpeg_lookup_failed path=%q err=%v", ffmpegPath, err)
+			DebugPrintf("screencast/hls encoder_probe ffmpeg_lookup_failed path=%q err=%v", ffmpegPath, err)
 		}
 		reportEncoderSelection(logOutput, debug, software, "ffmpeg_not_found")
 		return software
@@ -45,14 +44,14 @@ func selectVideoEncoder(ffmpegPath, baseFilter, gopArg string, hlsTimeSeconds in
 
 	available, encErr := ffmpegEncoderSet(ffmpegPath)
 	if encErr != nil && debug {
-		pipeline.DebugPrintf("screencast/hls encoder_probe ffmpeg_encoders_failed err=%v", encErr)
+		DebugPrintf("screencast/hls encoder_probe ffmpeg_encoders_failed err=%v", encErr)
 	}
 
 	for _, candidate := range candidates {
 		if len(available) > 0 {
-			if _, ok := available[candidate.codec]; !ok {
+			if _, ok := available[candidate.Codec]; !ok {
 				if debug {
-					pipeline.DebugPrintf("screencast/hls encoder_probe skip encoder=%q reason=not_in_ffmpeg_encoder_list", candidate.label)
+					DebugPrintf("screencast/hls encoder_probe skip encoder=%q reason=not_in_ffmpeg_encoder_list", candidate.Label)
 				}
 				continue
 			}
@@ -61,7 +60,7 @@ func selectVideoEncoder(ffmpegPath, baseFilter, gopArg string, hlsTimeSeconds in
 			reportEncoderSelection(logOutput, debug, candidate, "")
 			return candidate
 		} else if debug {
-			pipeline.DebugPrintf("screencast/hls encoder_probe failed encoder=%q err=%v", candidate.label, err)
+			DebugPrintf("screencast/hls encoder_probe failed encoder=%q err=%v", candidate.Label, err)
 		}
 	}
 
@@ -98,26 +97,26 @@ func ffmpegEncoderSet(ffmpegPath string) (map[string]struct{}, error) {
 	return encoders, nil
 }
 
-func reportEncoderSelection(logOutput io.Writer, debug bool, plan videoEncoderPlan, reason string) {
+func reportEncoderSelection(logOutput io.Writer, debug bool, plan VideoEncoderPlan, reason string) {
 	mode := "software"
-	if plan.hardware {
+	if plan.Hardware {
 		mode = "hardware"
 	}
 
-	msg := fmt.Sprintf("screencast video encoder: %s (%s)", plan.label, mode)
+	msg := fmt.Sprintf("screencast video encoder: %s (%s)", plan.Label, mode)
 	if logOutput != nil {
 		_, _ = fmt.Fprintln(logOutput, msg)
 	}
 	if debug {
 		if reason == "" {
-			pipeline.DebugPrintf("screencast/hls encoder selected=%q mode=%s", plan.label, mode)
+			DebugPrintf("screencast/hls encoder selected=%q mode=%s", plan.Label, mode)
 		} else {
-			pipeline.DebugPrintf("screencast/hls encoder selected=%q mode=%s reason=%s", plan.label, mode, reason)
+			DebugPrintf("screencast/hls encoder selected=%q mode=%s reason=%s", plan.Label, mode, reason)
 		}
 	}
 }
 
-func probeVideoEncoder(ffmpegPath string, plan videoEncoderPlan) error {
+func probeVideoEncoder(ffmpegPath string, plan VideoEncoderPlan) error {
 	ctx, cancel := context.WithTimeout(context.Background(), encoderProbeTimeout)
 	defer cancel()
 
@@ -125,7 +124,7 @@ func probeVideoEncoder(ffmpegPath string, plan videoEncoderPlan) error {
 		"-v", "error",
 		"-nostdin",
 	}
-	args = append(args, plan.globalArgs...)
+	args = append(args, plan.GlobalArgs...)
 	args = append(args,
 		"-f", "lavfi",
 		"-i", "color=c=black:s=1280x720:r=30:d=0.5",
@@ -133,10 +132,10 @@ func probeVideoEncoder(ffmpegPath string, plan videoEncoderPlan) error {
 		"-frames:v", "8",
 		"-r", "30",
 	)
-	if strings.TrimSpace(plan.videoFilter) != "" {
-		args = append(args, "-vf", plan.videoFilter)
+	if strings.TrimSpace(plan.VideoFilter) != "" {
+		args = append(args, "-vf", plan.VideoFilter)
 	}
-	args = append(args, plan.codecArgs...)
+	args = append(args, plan.CodecArgs...)
 	args = append(args, "-f", "null", "-")
 
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
@@ -156,20 +155,20 @@ func probeVideoEncoder(ffmpegPath string, plan videoEncoderPlan) error {
 	return nil
 }
 
-func hardwareEncoderCandidates(baseFilter, gopArg string, hlsTimeSeconds int) []videoEncoderPlan {
+func hardwareEncoderCandidates(baseFilter, gopArg string, hlsTimeSeconds int) []VideoEncoderPlan {
 	switch runtime.GOOS {
 	case "darwin":
-		return []videoEncoderPlan{
+		return []VideoEncoderPlan{
 			hardwareEncoderPlan("h264_videotoolbox", "h264_videotoolbox", nil, baseFilter+",format=yuv420p", gopArg, hlsTimeSeconds),
 		}
 	case "windows":
-		return []videoEncoderPlan{
+		return []VideoEncoderPlan{
 			hardwareEncoderPlan("h264_nvenc", "h264_nvenc", nil, baseFilter+",format=yuv420p", gopArg, hlsTimeSeconds),
 			hardwareEncoderPlan("h264_amf", "h264_amf", nil, baseFilter+",format=yuv420p", gopArg, hlsTimeSeconds),
 			hardwareEncoderPlan("h264_qsv", "h264_qsv", nil, baseFilter+",format=nv12", gopArg, hlsTimeSeconds),
 		}
 	default:
-		candidates := []videoEncoderPlan{
+		candidates := []VideoEncoderPlan{
 			hardwareEncoderPlan("h264_nvenc", "h264_nvenc", nil, baseFilter+",format=yuv420p", gopArg, hlsTimeSeconds),
 		}
 
@@ -186,14 +185,14 @@ func hardwareEncoderCandidates(baseFilter, gopArg string, hlsTimeSeconds int) []
 	}
 }
 
-func hardwareEncoderPlan(codec, label string, globalArgs []string, filter, gopArg string, hlsTimeSeconds int) videoEncoderPlan {
-	return videoEncoderPlan{
-		label:       label,
-		codec:       codec,
-		hardware:    true,
-		globalArgs:  append([]string(nil), globalArgs...),
-		videoFilter: filter,
-		codecArgs: []string{
+func hardwareEncoderPlan(codec, label string, globalArgs []string, filter, gopArg string, hlsTimeSeconds int) VideoEncoderPlan {
+	return VideoEncoderPlan{
+		Label:       label,
+		Codec:       codec,
+		Hardware:    true,
+		GlobalArgs:  append([]string(nil), globalArgs...),
+		VideoFilter: filter,
+		CodecArgs: []string{
 			"-c:v", codec,
 			"-b:v", "4000k",
 			"-maxrate", "5000k",
@@ -204,13 +203,13 @@ func hardwareEncoderPlan(codec, label string, globalArgs []string, filter, gopAr
 	}
 }
 
-func softwareEncoderPlan(baseFilter, gopArg string, hlsTimeSeconds int) videoEncoderPlan {
-	return videoEncoderPlan{
-		label:       "libx264",
-		codec:       "libx264",
-		hardware:    false,
-		videoFilter: baseFilter,
-		codecArgs: []string{
+func softwareEncoderPlan(baseFilter, gopArg string, hlsTimeSeconds int) VideoEncoderPlan {
+	return VideoEncoderPlan{
+		Label:       "libx264",
+		Codec:       "libx264",
+		Hardware:    false,
+		VideoFilter: baseFilter,
+		CodecArgs: []string{
 			"-c:v", "libx264",
 			"-preset", "ultrafast",
 			"-tune", "zerolatency",

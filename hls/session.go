@@ -113,7 +113,7 @@ func Start(options *Options) (*Session, error) {
 	}
 
 	playlistPath := filepath.Join(tempDir, "playlist.m3u8")
-	encoderPlan := selectVideoEncoder(opts.FFmpegPath, baseVideoFilter(fpsArg), gopArg, opts.HLSTimeSeconds, opts.LogOutput, debugEnabled)
+	encoderPlan := pipeline.SelectVideoEncoder(opts.FFmpegPath, baseVideoFilter(fpsArg), gopArg, opts.HLSTimeSeconds, opts.LogOutput, debugEnabled)
 
 	// ffmpeg derives rawvideo timestamps from the frame count and -r, so the
 	// video timeline only tracks real time if we actually feed it fps frames per
@@ -252,7 +252,7 @@ func baseVideoFilter(fpsArg string) string {
 // arguments without opening a capture backend or spawning anything.
 type ffmpegArgsParams struct {
 	debug          bool
-	encoderPlan    videoEncoderPlan
+	encoderPlan    pipeline.VideoEncoderPlan
 	videoQueueSize int
 	audioQueueSize int
 	pixelFormat    string
@@ -271,7 +271,7 @@ func ffmpegArgs(p ffmpegArgsParams) []string {
 	if p.debug {
 		args = append(args, "-loglevel", "debug")
 	}
-	args = append(args, p.encoderPlan.globalArgs...)
+	args = append(args, p.encoderPlan.GlobalArgs...)
 	args = append(args,
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
@@ -307,10 +307,10 @@ func ffmpegArgs(p ffmpegArgsParams) []string {
 	args = append(args,
 		"-r", p.fpsArg,
 	)
-	if strings.TrimSpace(p.encoderPlan.videoFilter) != "" {
-		args = append(args, "-vf", p.encoderPlan.videoFilter)
+	if strings.TrimSpace(p.encoderPlan.VideoFilter) != "" {
+		args = append(args, "-vf", p.encoderPlan.VideoFilter)
 	}
-	args = append(args, p.encoderPlan.codecArgs...)
+	args = append(args, p.encoderPlan.CodecArgs...)
 	if p.audioEnabled {
 		args = append(args,
 			"-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
