@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go2tv.app/screencast/capture"
+	"go2tv.app/screencast/internal/pipeline"
 )
 
 // flashBeepSource is a synthetic capture backend that emits one unmistakable
@@ -105,7 +106,7 @@ func (v *flashBeepVideo) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 
-		size := int(v.src.width) * int(v.src.height) * bytesPerPixelBGRA
+		size := int(v.src.width) * int(v.src.height) * pipeline.BytesPerPixelBGRA
 		frame := make([]byte, size)
 		if v.src.lit(due, interval) {
 			for i := range frame {
@@ -113,7 +114,7 @@ func (v *flashBeepVideo) Read(p []byte) (int, error) {
 			}
 		} else {
 			// Black, opaque: alpha high so the frame is not ambiguous to scale.
-			for i := 3; i < len(frame); i += bytesPerPixelBGRA {
+			for i := 3; i < len(frame); i += pipeline.BytesPerPixelBGRA {
 				frame[i] = 0xFF
 			}
 		}
@@ -148,19 +149,19 @@ func (a *flashBeepAudio) Read(p []byte) (int, error) {
 
 		// Pace by byte count: the offset itself is the clock, so the tone lands
 		// at the same instant as the flash without a second timer to drift.
-		due := time.Duration(a.offset) * time.Second / audioBytesPerSecond
+		due := time.Duration(a.offset) * time.Second / pipeline.AudioBytesPerSecond
 		if !a.src.waitUntil(due) {
 			return 0, io.EOF
 		}
 
-		span := time.Duration(chunk) * time.Second / audioBytesPerSecond
+		span := time.Duration(chunk) * time.Second / pipeline.AudioBytesPerSecond
 		b := make([]byte, chunk)
 		if a.src.lit(due, span) {
 			// 1kHz sine at high amplitude: unmistakable against silence under
 			// astats, and survives AAC intact.
 			const freq = 1000.0
-			sample := a.offset / audioFrameBytes
-			for i := 0; i < chunk; i += audioFrameBytes {
+			sample := a.offset / pipeline.AudioFrameBytes
+			for i := 0; i < chunk; i += pipeline.AudioFrameBytes {
 				v := int16(20000 * math.Sin(2*math.Pi*freq*float64(sample)/48000))
 				b[i] = byte(v)
 				b[i+1] = byte(v >> 8)

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go2tv.app/screencast/capture"
+	"go2tv.app/screencast/internal/pipeline"
 )
 
 // closeBound is what Session.Close is allowed to take. It is deliberately far
@@ -139,7 +140,7 @@ func (v *stubVideo) Read(p []byte) (int, error) {
 		if !v.src.wait(time.Second / time.Duration(v.src.fps)) {
 			return 0, io.EOF
 		}
-		v.buf = make([]byte, int(v.src.width)*int(v.src.height)*bytesPerPixelBGRA)
+		v.buf = make([]byte, int(v.src.width)*int(v.src.height)*pipeline.BytesPerPixelBGRA)
 	}
 
 	n := copy(p, v.buf)

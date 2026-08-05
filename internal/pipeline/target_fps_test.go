@@ -1,4 +1,4 @@
-package hls
+package pipeline
 
 import (
 	"testing"
@@ -41,8 +41,8 @@ func TestTargetFPS(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := targetFPS(tc.stream); got != tc.expected {
-				t.Fatalf("targetFPS() = %d, want %d", got, tc.expected)
+			if got := TargetFPS(tc.stream); got != tc.expected {
+				t.Fatalf("TargetFPS() = %d, want %d", got, tc.expected)
 			}
 		})
 	}

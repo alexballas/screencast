@@ -1,4 +1,4 @@
-package hls
+package pipeline
 
 import (
 	"encoding/binary"
@@ -36,7 +36,7 @@ func (w *countingWriter) Write(p []byte) (int, error) {
 	// increasing: a repeat means the relay re-sent audio ffmpeg already has, and
 	// a counter that does not advance by whole frames means a trim landed
 	// mid-frame and shifted the stereo channels.
-	for i := 0; i+audioFrameBytes <= len(p); i += audioFrameBytes {
+	for i := 0; i+AudioFrameBytes <= len(p); i += AudioFrameBytes {
 		seq := binary.LittleEndian.Uint32(p[i:])
 		if w.seqErr == nil && seq <= w.lastPC {
 			w.seqErr = fmt.Errorf("relayed PCM frame %d after %d: audio replayed or misaligned", seq, w.lastPC)
@@ -83,8 +83,8 @@ func isSilence(p []byte) bool {
 func TestAudioPumpDiscardsPreroll(t *testing.T) {
 	pr, pw := io.Pipe()
 
-	pump := startAudioPump(pr, defaultAudioChunkSize, defaultAudioRelayQueue)
-	defer pump.close()
+	pump := startAudioPump(pr, DefaultAudioChunkSize, DefaultAudioRelayQueue)
+	defer pump.Close()
 
 	preroll := make([]byte, audioBytesFor(500*time.Millisecond))
 	go func() {
@@ -113,11 +113,11 @@ func TestAudioPumpDiscardsPreroll(t *testing.T) {
 // partial PCM frame shifts every later sample for the rest of the session. The
 // pump must realign whatever the source hands it.
 func TestAudioPumpEmitsWholePCMFrames(t *testing.T) {
-	// Deliberately odd read sizes, none a multiple of audioFrameBytes.
+	// Deliberately odd read sizes, none a multiple of AudioFrameBytes.
 	src := &oddSizedReader{sizes: []int{1, 3, 7, 13, 5, 2, 9}, total: 4000}
 
-	pump := startAudioPump(src, defaultAudioChunkSize, defaultAudioRelayQueue)
-	defer pump.close()
+	pump := startAudioPump(src, DefaultAudioChunkSize, DefaultAudioRelayQueue)
+	defer pump.Close()
 
 	got := 0
 	deadline := time.Now().Add(2 * time.Second)
@@ -130,8 +130,8 @@ func TestAudioPumpEmitsWholePCMFrames(t *testing.T) {
 				}
 				return
 			}
-			if len(b)%audioFrameBytes != 0 {
-				t.Fatalf("pump emitted %d bytes, not a whole %d-byte PCM frame", len(b), audioFrameBytes)
+			if len(b)%AudioFrameBytes != 0 {
+				t.Fatalf("pump emitted %d bytes, not a whole %d-byte PCM frame", len(b), AudioFrameBytes)
 			}
 			got += len(b)
 		case <-time.After(200 * time.Millisecond):
@@ -179,8 +179,8 @@ func TestAudioRelayShortensClockByAbandonedVideo(t *testing.T) {
 	defer pw.Close()
 	floodPCM(t, pw)
 
-	pump := startAudioPump(pr, defaultAudioChunkSize, defaultAudioRelayQueue)
-	skew := &timelineSkew{}
+	pump := startAudioPump(pr, DefaultAudioChunkSize, DefaultAudioRelayQueue)
+	skew := &TimelineSkew{}
 	dst := &countingWriter{}
 
 	done := make(chan struct{})
@@ -192,7 +192,7 @@ func TestAudioRelayShortensClockByAbandonedVideo(t *testing.T) {
 	time.Sleep(run / 2)
 	skew.drop(12, abandoned) // 12 frames at 60fps
 	time.Sleep(run / 2)
-	pump.close()
+	pump.Close()
 	<-done
 
 	got := int64(dst.total())
@@ -234,8 +234,8 @@ func TestAudioRelayAnchorsToVideoStart(t *testing.T) {
 	defer pw.Close()
 	floodPCM(t, pw)
 
-	pump := startAudioPump(pr, defaultAudioChunkSize, defaultAudioRelayQueue)
-	skew := &timelineSkew{}
+	pump := startAudioPump(pr, DefaultAudioChunkSize, DefaultAudioRelayQueue)
+	skew := &TimelineSkew{}
 	// ffmpeg took the first video frame anchorLag ago; the audio input is only
 	// being connected now.
 	skew.markStart(time.Now().Add(-anchorLag))
@@ -248,7 +248,7 @@ func TestAudioRelayAnchorsToVideoStart(t *testing.T) {
 	}()
 
 	time.Sleep(run)
-	pump.close()
+	pump.Close()
 	<-done
 
 	got := int64(dst.total())
@@ -266,7 +266,7 @@ func TestAudioRelayAnchorsToVideoStart(t *testing.T) {
 }
 
 func audioDuration(bytes int64) time.Duration {
-	return (time.Duration(bytes) * time.Second / audioBytesPerSecond).Round(time.Millisecond)
+	return (time.Duration(bytes) * time.Second / AudioBytesPerSecond).Round(time.Millisecond)
 }
 
 // floodPCM keeps w oversupplied with capture audio until the test ends, so the
@@ -285,7 +285,7 @@ func floodPCM(t *testing.T, w *io.PipeWriter) {
 	t.Cleanup(func() { close(stop) })
 
 	go func() {
-		chunk := make([]byte, defaultAudioChunkSize)
+		chunk := make([]byte, DefaultAudioChunkSize)
 		seq := uint32(1)
 		for {
 			select {
@@ -293,7 +293,7 @@ func floodPCM(t *testing.T, w *io.PipeWriter) {
 				return
 			default:
 			}
-			for i := 0; i+audioFrameBytes <= len(chunk); i += audioFrameBytes {
+			for i := 0; i+AudioFrameBytes <= len(chunk); i += AudioFrameBytes {
 				binary.LittleEndian.PutUint32(chunk[i:], seq)
 				seq++
 			}
@@ -347,7 +347,7 @@ func TestAudioRelayTracksWallClock(t *testing.T) {
 				floodPCM(t, pw)
 			}
 
-			pump := startAudioPump(pr, defaultAudioChunkSize, defaultAudioRelayQueue)
+			pump := startAudioPump(pr, DefaultAudioChunkSize, DefaultAudioRelayQueue)
 			dst := &countingWriter{}
 
 			done := make(chan struct{})
@@ -357,7 +357,7 @@ func TestAudioRelayTracksWallClock(t *testing.T) {
 			}()
 
 			time.Sleep(run)
-			pump.close()
+			pump.Close()
 			<-done
 
 			got := int64(dst.total())
@@ -365,8 +365,8 @@ func TestAudioRelayTracksWallClock(t *testing.T) {
 				t.Fatalf("relayed %v of audio over %v of wall clock, want within [%v, %v]",
 					audioDuration(got), run, audioDuration(tc.lower), audioDuration(tc.upper))
 			}
-			if got%audioFrameBytes != 0 {
-				t.Fatalf("relayed %d bytes, not aligned to a %d-byte PCM frame", got, audioFrameBytes)
+			if got%AudioFrameBytes != 0 {
+				t.Fatalf("relayed %d bytes, not aligned to a %d-byte PCM frame", got, AudioFrameBytes)
 			}
 
 			captured := int64(dst.captured())

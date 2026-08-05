@@ -1,4 +1,4 @@
-package hls
+package pipeline
 
 import (
 	"fmt"
@@ -6,15 +6,13 @@ import (
 	"net"
 	"sync"
 	"time"
-
-	"go2tv.app/screencast/internal/pipeline"
 )
 
 const (
 	// Capture audio is always negotiated as 48kHz stereo s16le.
-	audioBytesPerSecond = 48000 * 2 * 2
+	AudioBytesPerSecond = 48000 * 2 * 2
 	// One PCM frame (both channels). Every insert/trim must stay aligned to it.
-	audioFrameBytes = 4
+	AudioFrameBytes = 4
 
 	// Silence is only injected once the audio timeline falls this far behind the
 	// wall clock, so normal per-buffer jitter never lengthens the track.
@@ -23,9 +21,14 @@ const (
 	// burst); stretching past the video is what desyncs the stream.
 	audioTrimThreshold = 120 * time.Millisecond
 	audioFillChunk     = 20 * time.Millisecond
+
+	DefaultAudioChunkSize = 4096
+	// ~0.7s of jitter slack. Anything deeper just delays the moment the relay
+	// notices it is behind the wall clock.
+	DefaultAudioRelayQueue = 32
 )
 
-// audioPump owns the capture audio source for the whole session lifetime.
+// AudioPump owns the capture audio source for the whole session lifetime.
 //
 // It starts draining as soon as the session starts, not when ffmpeg connects:
 // capture backends buffer whatever they produce, so every millisecond spent
@@ -36,22 +39,22 @@ const (
 // it closes the capture source, so a producer parked in src.Read could only be
 // released by a later step. Closing the source is what ends it; p.closed just
 // stops it promptly when a read happens to return first.
-type audioPump struct {
+type AudioPump struct {
 	ch        chan []byte
 	closed    chan struct{}
 	done      chan struct{} // closed once the producer goroutine has exited
 	closeOnce sync.Once
 }
 
-func startAudioPump(src io.Reader, chunkSize, queueSize int) *audioPump {
+func startAudioPump(src io.Reader, chunkSize, queueSize int) *AudioPump {
 	if chunkSize <= 0 {
-		chunkSize = defaultAudioChunkSize
+		chunkSize = DefaultAudioChunkSize
 	}
 	if queueSize <= 0 {
-		queueSize = defaultAudioRelayQueue
+		queueSize = DefaultAudioRelayQueue
 	}
 
-	p := &audioPump{
+	p := &AudioPump{
 		ch:     make(chan []byte, queueSize),
 		closed: make(chan struct{}),
 		done:   make(chan struct{}),
@@ -68,7 +71,7 @@ func startAudioPump(src io.Reader, chunkSize, queueSize int) *audioPump {
 		// later sample by that many bytes for the rest of the session. Hold the
 		// remainder back until the next read completes it, so every buffer in
 		// the pump - and so every trim offset computed against one - is whole.
-		buf := make([]byte, chunkSize+audioFrameBytes)
+		buf := make([]byte, chunkSize+AudioFrameBytes)
 		carry := 0
 		for {
 			n, err := src.Read(buf[carry:])
@@ -97,10 +100,10 @@ func startAudioPump(src io.Reader, chunkSize, queueSize int) *audioPump {
 	return p
 }
 
-// startAudioRelay opens the loopback socket ffmpeg reads PCM from and starts
+// StartAudioRelay opens the loopback socket ffmpeg reads PCM from and starts
 // draining src into it. The URL is what goes on the ffmpeg command line; the
 // listener and the pump are the caller's to close.
-func startAudioRelay(src io.Reader, chunkSize, queueSize int, skew *timelineSkew, debugEnabled bool) (net.Listener, *audioPump, string, error) {
+func StartAudioRelay(src io.Reader, chunkSize, queueSize int, skew *TimelineSkew, debugEnabled bool) (net.Listener, *AudioPump, string, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, nil, "", err
@@ -111,7 +114,7 @@ func startAudioRelay(src io.Reader, chunkSize, queueSize int, skew *timelineSkew
 	// from byte zero - a permanent audio-behind-video offset.
 	pump := startAudioPump(src, chunkSize, queueSize)
 
-	go func(l net.Listener, pump *audioPump) {
+	go func(l net.Listener, pump *AudioPump) {
 		defer l.Close()
 		conn, acceptErr := l.Accept()
 		if acceptErr != nil {
@@ -124,10 +127,10 @@ func startAudioRelay(src io.Reader, chunkSize, queueSize int, skew *timelineSkew
 		// rest of the session.
 		dropped := pump.discardBuffered()
 		if debugEnabled {
-			pipeline.DebugPrintf(
+			DebugPrintf(
 				"screencast/hls audio_preroll_dropped bytes=%d approx_ms=%d",
 				dropped,
-				int64(dropped)*1000/audioBytesPerSecond,
+				int64(dropped)*1000/AudioBytesPerSecond,
 			)
 		}
 		pump.relay(conn, skew)
@@ -137,7 +140,7 @@ func startAudioRelay(src io.Reader, chunkSize, queueSize int, skew *timelineSkew
 }
 
 // offer queues b, dropping the oldest buffer when the reader cannot keep up.
-func (p *audioPump) offer(b []byte) {
+func (p *AudioPump) offer(b []byte) {
 	select {
 	case p.ch <- b:
 		return
@@ -155,7 +158,7 @@ func (p *audioPump) offer(b []byte) {
 }
 
 // discardBuffered drops everything captured before ffmpeg attached.
-func (p *audioPump) discardBuffered() int {
+func (p *AudioPump) discardBuffered() int {
 	dropped := 0
 	for {
 		select {
@@ -170,7 +173,7 @@ func (p *audioPump) discardBuffered() int {
 	}
 }
 
-func (p *audioPump) close() {
+func (p *AudioPump) Close() {
 	if p == nil {
 		return
 	}
@@ -190,10 +193,10 @@ func (p *audioPump) close() {
 // span or the stream desyncs by that much forever. Nothing can unwrite the bytes
 // already sent, so the relay stops writing until the shortened clock catches up
 // to them - both timelines end up equally short.
-func (p *audioPump) relay(dst io.Writer, skew *timelineSkew) {
+func (p *AudioPump) relay(dst io.Writer, skew *TimelineSkew) {
 	silenceBytes := alignAudio(audioBytesFor(audioFillChunk))
 	if silenceBytes <= 0 {
-		silenceBytes = audioFrameBytes
+		silenceBytes = AudioFrameBytes
 	}
 	silence := make([]byte, silenceBytes)
 
@@ -266,7 +269,7 @@ func audioBytesFor(d time.Duration) int64 {
 	}
 	// Scale via milliseconds: nanoseconds * bytes-per-second overflows int64 on
 	// long sessions.
-	return d.Milliseconds() * audioBytesPerSecond / 1000
+	return d.Milliseconds() * AudioBytesPerSecond / 1000
 }
 
 func audioExpectedBytes(elapsed time.Duration) int64 {
@@ -279,5 +282,5 @@ func alignAudio[T int | int64](n T) T {
 	if n <= 0 {
 		return 0
 	}
-	return n - n%audioFrameBytes
+	return n - n%AudioFrameBytes
 }

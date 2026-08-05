@@ -25,14 +25,8 @@ const (
 	defaultDeleteThreshold = 36
 	defaultStartupTimeout  = 60 * time.Second
 	defaultTempDirPrefix   = "screencast-hls-"
-	defaultMaxFrameRate    = 60
-	defaultHighResCapFPS   = 30
 	defaultVideoQueueSize  = 2048
 	defaultAudioQueueSize  = 8192
-	defaultAudioChunkSize  = 4096
-	// ~0.7s of jitter slack. Anything deeper just delays the moment the relay
-	// notices it is behind the wall clock.
-	defaultAudioRelayQueue = 32
 	defaultHLSTimeSeconds  = 1
 	defaultHLSListSize     = 24
 )
@@ -59,8 +53,8 @@ type Session struct {
 	dir        string
 	stream     io.ReadCloser
 	audioSrc   io.ReadCloser
-	audioPump  *audioPump
-	skew       *timelineSkew
+	audioPump  *pipeline.AudioPump
+	skew       *pipeline.TimelineSkew
 	ownAudio   bool
 	cmd        *exec.Cmd
 	audioL     net.Listener
@@ -95,7 +89,7 @@ func Start(options *Options) (*Session, error) {
 		return nil, fmt.Errorf("screencast open: %w", err)
 	}
 
-	fps := targetFPS(captureStream)
+	fps := pipeline.TargetFPS(captureStream)
 	if debugEnabled {
 		pipeline.DebugPrintf(
 			"screencast/hls fps_target platform=%s width=%d height=%d source=%d target=%d",
@@ -125,8 +119,8 @@ func Start(options *Options) (*Session, error) {
 	// video timeline only tracks real time if we actually feed it fps frames per
 	// second. Every backend is damage-driven and delivers fewer, so pace on all
 	// platforms - otherwise video drifts behind the audio without bound.
-	skew := &timelineSkew{}
-	videoInput, err := newFramePacer(captureStream, fps, skew)
+	skew := &pipeline.TimelineSkew{}
+	videoInput, err := pipeline.NewFramePacer(captureStream, fps, skew)
 	if err != nil {
 		_ = captureStream.Close()
 		_ = os.RemoveAll(tempDir)
@@ -150,10 +144,10 @@ func Start(options *Options) (*Session, error) {
 	audioURL := ""
 	var (
 		audioL net.Listener
-		pump   *audioPump
+		pump   *pipeline.AudioPump
 	)
 	if audioEnabled {
-		audioL, pump, audioURL, err = startAudioRelay(audioSource, opts.AudioChunkSize, opts.AudioRelayQueue, skew, debugEnabled)
+		audioL, pump, audioURL, err = pipeline.StartAudioRelay(audioSource, opts.AudioChunkSize, opts.AudioRelayQueue, skew, debugEnabled)
 		if err != nil {
 			if ownAudioSource && audioSource != nil {
 				_ = audioSource.Close()
@@ -203,7 +197,7 @@ func Start(options *Options) (*Session, error) {
 		if audioL != nil {
 			_ = audioL.Close()
 		}
-		pump.close()
+		pump.Close()
 		if ownAudioSource && audioSource != nil {
 			_ = audioSource.Close()
 		}
@@ -366,7 +360,7 @@ func (s *Session) DroppedFrames() int64 {
 	if s == nil {
 		return 0
 	}
-	return s.skew.droppedFrames()
+	return s.skew.DroppedFrames()
 }
 
 func (s *Session) StderrTail(n int) string {
@@ -396,7 +390,7 @@ func (s *Session) Close() error {
 			out = errors.Join(out, s.audioL.Close())
 		}
 
-		s.audioPump.close()
+		s.audioPump.Close()
 
 		if s.stream != nil {
 			done := make(chan error, 1)
@@ -478,7 +472,7 @@ func normalizeOptions(options *Options) (*Options, error) {
 		opts.AudioQueueSize = 32768
 	}
 	if opts.AudioChunkSize == 0 {
-		opts.AudioChunkSize = defaultAudioChunkSize
+		opts.AudioChunkSize = pipeline.DefaultAudioChunkSize
 	} else if opts.AudioChunkSize < 512 {
 		opts.AudioChunkSize = 512
 	}
@@ -486,7 +480,7 @@ func normalizeOptions(options *Options) (*Options, error) {
 		opts.AudioChunkSize = 32768
 	}
 	if opts.AudioRelayQueue == 0 {
-		opts.AudioRelayQueue = defaultAudioRelayQueue
+		opts.AudioRelayQueue = pipeline.DefaultAudioRelayQueue
 	} else if opts.AudioRelayQueue < 8 {
 		opts.AudioRelayQueue = 8
 	}
@@ -495,23 +489,6 @@ func normalizeOptions(options *Options) (*Options, error) {
 	}
 
 	return &opts, nil
-}
-
-func targetFPS(stream *capture.Stream) uint32 {
-	frameRate := stream.FrameRate
-	if frameRate == 0 {
-		frameRate = defaultMaxFrameRate
-	}
-
-	target := frameRate
-	if target > defaultMaxFrameRate {
-		target = defaultMaxFrameRate
-	}
-	if stream.Width*stream.Height > 1920*1080 && target > defaultHighResCapFPS {
-		target = defaultHighResCapFPS
-	}
-
-	return target
 }
 
 func waitForPlaylistReady(path, baseDir string, timeout time.Duration, ffmpegDone <-chan error, ffmpegStderr *lockedBuffer) error {

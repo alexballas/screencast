@@ -1,4 +1,4 @@
-package hls
+package pipeline
 
 import (
 	"errors"
@@ -9,18 +9,17 @@ import (
 	"time"
 
 	"go2tv.app/screencast/capture"
-	"go2tv.app/screencast/internal/pipeline"
 )
 
 const (
-	bytesPerPixelBGRA = 4
+	BytesPerPixelBGRA = 4
 	// Frames the pacer may emit in one tick while catching up after a stall.
 	maxFrameBurst = 8
 	// Backlog past which catching up is hopeless rather than merely late.
 	maxFrameDebtSeconds = 2
 )
 
-// timelineSkew is the shared state that keeps the two ffmpeg input timelines
+// TimelineSkew is the shared state that keeps the two ffmpeg input timelines
 // describing the same stretch of real time.
 //
 // ffmpeg derives both pts from counts - frames for rawvideo, bytes for s16le -
@@ -38,7 +37,7 @@ const (
 // and every later drop stacks on top. The relay shortens its own clock by
 // whatever lands here, leaving only the trim dead band as residual instead of
 // an unbounded gap.
-type timelineSkew struct {
+type TimelineSkew struct {
 	dropped atomic.Int64 // nanoseconds of timeline abandoned
 	frames  atomic.Int64
 	anchor  atomic.Int64 // UnixNano of video pts 0; 0 until the pacer starts
@@ -47,7 +46,7 @@ type timelineSkew struct {
 // markStart records the instant the first video frame reached ffmpeg. Only the
 // first call counts: the pacer re-anchors its own clock when it abandons a span,
 // but pts 0 stays where it was and the relay compensates via abandoned instead.
-func (s *timelineSkew) markStart(t time.Time) {
+func (s *TimelineSkew) markStart(t time.Time) {
 	if s == nil {
 		return
 	}
@@ -56,7 +55,7 @@ func (s *timelineSkew) markStart(t time.Time) {
 
 // startedAt reports the real time video pts 0 corresponds to, or fallback when
 // there is no pacer (tests) or it has not emitted its first frame yet.
-func (s *timelineSkew) startedAt(fallback time.Time) time.Time {
+func (s *TimelineSkew) startedAt(fallback time.Time) time.Time {
 	if s == nil {
 		return fallback
 	}
@@ -66,7 +65,7 @@ func (s *timelineSkew) startedAt(fallback time.Time) time.Time {
 	return fallback
 }
 
-func (s *timelineSkew) drop(frames int64, d time.Duration) {
+func (s *TimelineSkew) drop(frames int64, d time.Duration) {
 	if s == nil || frames <= 0 {
 		return
 	}
@@ -75,30 +74,30 @@ func (s *timelineSkew) drop(frames int64, d time.Duration) {
 }
 
 // abandoned reports the total timeline the pacer skipped.
-func (s *timelineSkew) abandoned() time.Duration {
+func (s *TimelineSkew) abandoned() time.Duration {
 	if s == nil {
 		return 0
 	}
 	return time.Duration(s.dropped.Load())
 }
 
-func (s *timelineSkew) droppedFrames() int64 {
+func (s *TimelineSkew) DroppedFrames() int64 {
 	if s == nil {
 		return 0
 	}
 	return s.frames.Load()
 }
 
-type framePacer struct {
+type FramePacer struct {
 	src       io.ReadCloser
 	pr        *io.PipeReader
 	pw        *io.PipeWriter
-	skew      *timelineSkew
+	skew      *TimelineSkew
 	closeOnce sync.Once
 	closeErr  error
 }
 
-// newFramePacer takes ownership of stream: on success the returned pacer's
+// NewFramePacer takes ownership of stream: on success the returned pacer's
 // Close is what closes it, and the caller must not close it as well. On failure
 // ownership stays with the caller.
 //
@@ -106,7 +105,7 @@ type framePacer struct {
 // straight back. Handing the same object back as the paced input would make the
 // caller's two handles one, and which of them still owns the stream would then
 // depend on arguments it cannot inspect afterwards.
-func newFramePacer(stream *capture.Stream, fps uint32, skew *timelineSkew) (*framePacer, error) {
+func NewFramePacer(stream *capture.Stream, fps uint32, skew *TimelineSkew) (*FramePacer, error) {
 	if stream == nil || stream.ReadCloser == nil {
 		return nil, errors.New("nil stream")
 	}
@@ -120,7 +119,7 @@ func newFramePacer(stream *capture.Stream, fps uint32, skew *timelineSkew) (*fra
 	}
 
 	pr, pw := io.Pipe()
-	p := &framePacer{
+	p := &FramePacer{
 		src:  stream,
 		pr:   pr,
 		pw:   pw,
@@ -128,8 +127,8 @@ func newFramePacer(stream *capture.Stream, fps uint32, skew *timelineSkew) (*fra
 	}
 
 	go p.run(frameSize, fps)
-	if pipeline.DebugEnabled() {
-		pipeline.DebugPrintf(
+	if DebugEnabled() {
+		DebugPrintf(
 			"screencast/hls frame_pacer enabled width=%d height=%d fps=%d frame_bytes=%d",
 			stream.Width,
 			stream.Height,
@@ -148,7 +147,7 @@ func rawFrameSize(width, height uint32, pixelFormat string) (int, error) {
 
 	switch pixelFormat {
 	case "", capture.PixelFormatBGRA:
-		size := uint64(width) * uint64(height) * bytesPerPixelBGRA
+		size := uint64(width) * uint64(height) * BytesPerPixelBGRA
 		if size == 0 || size > uint64(^uint(0)>>1) {
 			return 0, fmt.Errorf("raw frame too large: %dx%d", width, height)
 		}
@@ -158,18 +157,18 @@ func rawFrameSize(width, height uint32, pixelFormat string) (int, error) {
 	}
 }
 
-func (p *framePacer) Read(buf []byte) (int, error) {
+func (p *FramePacer) Read(buf []byte) (int, error) {
 	return p.pr.Read(buf)
 }
 
-func (p *framePacer) Close() error {
+func (p *FramePacer) Close() error {
 	p.closeOnce.Do(func() {
 		p.closeErr = errors.Join(p.src.Close(), p.pw.Close(), p.pr.Close())
 	})
 	return p.closeErr
 }
 
-func (p *framePacer) run(frameSize int, fps uint32) {
+func (p *FramePacer) run(frameSize int, fps uint32) {
 	frameCh := make(chan []byte, 1)
 	srcErrCh := make(chan error, 1)
 
@@ -284,13 +283,13 @@ func (p *framePacer) run(frameSize int, fps uint32) {
 				skipped := debt - 1
 				abandoned := time.Duration(skipped) * frameInterval
 				p.skew.drop(skipped, abandoned)
-				if pipeline.DebugEnabled() {
-					pipeline.DebugPrintf(
+				if DebugEnabled() {
+					DebugPrintf(
 						"screencast/hls frame_pacer overloaded dropped_frames=%d behind=%s fps=%d total_dropped=%d",
 						skipped,
 						abandoned.Round(time.Millisecond),
 						fps,
-						p.skew.droppedFrames(),
+						p.skew.DroppedFrames(),
 					)
 				}
 				start = start.Add(abandoned)

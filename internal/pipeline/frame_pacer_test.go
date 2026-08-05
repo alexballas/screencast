@@ -1,4 +1,4 @@
-package hls
+package pipeline
 
 import (
 	"bytes"
@@ -13,14 +13,14 @@ import (
 // newTickingPacer wires a pacer to a BGRA source that emits one frame per tick
 // at fps, the shape every capture backend presents. Returns the pacer and its
 // frame size; both ends are closed on test cleanup, pacer first.
-func newTickingPacer(t *testing.T, fps uint32, skew *timelineSkew) (io.ReadCloser, int) {
+func newTickingPacer(t *testing.T, fps uint32, skew *TimelineSkew) (io.ReadCloser, int) {
 	t.Helper()
 
 	const (
 		width  = 4
 		height = 1
 	)
-	frameSize := width * height * bytesPerPixelBGRA
+	frameSize := width * height * BytesPerPixelBGRA
 
 	srcR, srcW := io.Pipe()
 	t.Cleanup(func() { _ = srcW.Close() })
@@ -36,7 +36,7 @@ func newTickingPacer(t *testing.T, fps uint32, skew *timelineSkew) (io.ReadClose
 		}
 	}()
 
-	paced, err := newFramePacer(&capture.Stream{
+	paced, err := NewFramePacer(&capture.Stream{
 		ReadCloser:  srcR,
 		Width:       width,
 		Height:      height,
@@ -44,7 +44,7 @@ func newTickingPacer(t *testing.T, fps uint32, skew *timelineSkew) (io.ReadClose
 		PixelFormat: capture.PixelFormatBGRA,
 	}, fps, skew)
 	if err != nil {
-		t.Fatalf("newFramePacer() error = %v", err)
+		t.Fatalf("NewFramePacer() error = %v", err)
 	}
 	t.Cleanup(func() { _ = paced.Close() })
 
@@ -58,7 +58,7 @@ func TestFramePacerRepeatsLatestFrame(t *testing.T) {
 		fps    = 50
 	)
 
-	frameSize := width * height * bytesPerPixelBGRA
+	frameSize := width * height * BytesPerPixelBGRA
 	srcR, srcW := io.Pipe()
 	stream := &capture.Stream{
 		ReadCloser:  srcR,
@@ -68,9 +68,9 @@ func TestFramePacerRepeatsLatestFrame(t *testing.T) {
 		PixelFormat: capture.PixelFormatBGRA,
 	}
 
-	paced, err := newFramePacer(stream, fps, nil)
+	paced, err := NewFramePacer(stream, fps, nil)
 	if err != nil {
-		t.Fatalf("newFramePacer() error = %v", err)
+		t.Fatalf("NewFramePacer() error = %v", err)
 	}
 	defer paced.Close()
 
@@ -161,7 +161,7 @@ func TestFramePacerRecoversFromConsumerStall(t *testing.T) {
 func TestFramePacerBurstUsesFreshFrames(t *testing.T) {
 	const (
 		fps       = 50
-		frameSize = bytesPerPixelBGRA // 1x1 BGRA: the whole frame is its id
+		frameSize = BytesPerPixelBGRA // 1x1 BGRA: the whole frame is its id
 		interval  = time.Second / fps
 		stall     = 200 * time.Millisecond
 		reads     = maxFrameBurst
@@ -185,7 +185,7 @@ func TestFramePacerBurstUsesFreshFrames(t *testing.T) {
 		}
 	}()
 
-	paced, err := newFramePacer(&capture.Stream{
+	paced, err := NewFramePacer(&capture.Stream{
 		ReadCloser:  srcR,
 		Width:       1,
 		Height:      1,
@@ -193,7 +193,7 @@ func TestFramePacerBurstUsesFreshFrames(t *testing.T) {
 		PixelFormat: capture.PixelFormatBGRA,
 	}, fps, nil)
 	if err != nil {
-		t.Fatalf("newFramePacer() error = %v", err)
+		t.Fatalf("NewFramePacer() error = %v", err)
 	}
 	t.Cleanup(func() { _ = paced.Close() })
 
@@ -238,7 +238,7 @@ func TestFramePacerRecordsAbandonedTimeline(t *testing.T) {
 		stall = maxFrameDebtSeconds*time.Second + 500*time.Millisecond
 	)
 
-	skew := &timelineSkew{}
+	skew := &TimelineSkew{}
 	paced, frameSize := newTickingPacer(t, fps, skew)
 
 	// The first read anchors the pacer clock; the stall then blocks its write
@@ -250,13 +250,13 @@ func TestFramePacerRecordsAbandonedTimeline(t *testing.T) {
 	time.Sleep(stall)
 
 	deadline := time.Now().Add(time.Second)
-	for skew.droppedFrames() == 0 && time.Now().Before(deadline) {
+	for skew.DroppedFrames() == 0 && time.Now().Before(deadline) {
 		if _, err := io.ReadFull(paced, buf); err != nil {
 			t.Fatalf("io.ReadFull() error = %v", err)
 		}
 	}
 
-	dropped := skew.droppedFrames()
+	dropped := skew.DroppedFrames()
 	if dropped == 0 {
 		t.Fatal("pacer abandoned the stall without recording it: audio cannot compensate")
 	}
@@ -280,13 +280,13 @@ func TestNewFramePacerRejectsZeroFrameRate(t *testing.T) {
 		PixelFormat: capture.PixelFormatBGRA,
 	}
 
-	paced, err := newFramePacer(stream, 0, nil)
+	paced, err := NewFramePacer(stream, 0, nil)
 	if err == nil {
 		_ = paced.Close()
-		t.Fatal("newFramePacer() accepted a zero frame rate")
+		t.Fatal("NewFramePacer() accepted a zero frame rate")
 	}
 	if paced != nil {
-		t.Fatalf("newFramePacer() = %#v on error, want nil: the caller still owns the stream", paced)
+		t.Fatalf("NewFramePacer() = %#v on error, want nil: the caller still owns the stream", paced)
 	}
 }
 
@@ -295,7 +295,7 @@ func TestRawFrameSizeBGRA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rawFrameSize() error = %v", err)
 	}
-	if want := 1280 * 720 * bytesPerPixelBGRA; got != want {
+	if want := 1280 * 720 * BytesPerPixelBGRA; got != want {
 		t.Fatalf("rawFrameSize() = %d, want %d", got, want)
 	}
 }
