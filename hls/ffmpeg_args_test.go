@@ -49,26 +49,26 @@ func TestFFmpegArgs(t *testing.T) {
 		t.Fatalf("hlsMuxerArgs() = %q, want %q", muxer, hlsMuxer)
 	}
 
-	base := ffmpegArgsParams{
-		encoderPlan:    software,
-		videoQueueSize: 2048,
-		audioQueueSize: 8192,
-		pixelFormat:    "BGRA",
-		width:          1920,
-		height:         1080,
-		fpsArg:         "60",
-		muxerArgs:      muxer,
+	base := pipeline.FFmpegArgsParams{
+		EncoderPlan:    software,
+		VideoQueueSize: 2048,
+		AudioQueueSize: 8192,
+		PixelFormat:    "BGRA",
+		Width:          1920,
+		Height:         1080,
+		FpsArg:         "60",
+		MuxerArgs:      muxer,
 	}
 
-	withAudio := func(p ffmpegArgsParams) ffmpegArgsParams {
-		p.audioEnabled = true
-		p.audioURL = "tcp://127.0.0.1:45123"
+	withAudio := func(p pipeline.FFmpegArgsParams) pipeline.FFmpegArgsParams {
+		p.AudioEnabled = true
+		p.AudioURL = "tcp://127.0.0.1:45123"
 		return p
 	}
 
 	tests := []struct {
 		name   string
-		params ffmpegArgsParams
+		params pipeline.FFmpegArgsParams
 		want   []string
 	}{
 		{
@@ -167,10 +167,10 @@ func TestFFmpegArgs(t *testing.T) {
 			// -loglevel comes first, and the encoder's own global arguments follow
 			// it: -vaapi_device has to be in front of the input it applies to.
 			name: "debug prefix and encoder global args",
-			params: func() ffmpegArgsParams {
+			params: func() pipeline.FFmpegArgsParams {
 				p := base
-				p.debug = true
-				p.encoderPlan = pipeline.VideoEncoderPlan{
+				p.Debug = true
+				p.EncoderPlan = pipeline.VideoEncoderPlan{
 					Label:       "h264_vaapi (/dev/dri/renderD128)",
 					Codec:       "h264_vaapi",
 					Hardware:    true,
@@ -213,9 +213,9 @@ func TestFFmpegArgs(t *testing.T) {
 			// An empty filter must omit -vf entirely: ffmpeg rejects an empty
 			// filtergraph rather than treating it as a passthrough.
 			name: "empty filter",
-			params: func() ffmpegArgsParams {
+			params: func() pipeline.FFmpegArgsParams {
 				p := base
-				p.encoderPlan = pipeline.VideoEncoderPlan{
+				p.EncoderPlan = pipeline.VideoEncoderPlan{
 					Label:     "libx264",
 					Codec:     "libx264",
 					CodecArgs: []string{"-c:v", "libx264"},
@@ -251,11 +251,11 @@ func TestFFmpegArgs(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ffmpegArgs(tc.params)
+			got := pipeline.FFmpegArgs(tc.params)
 			if slices.Equal(got, tc.want) {
 				return
 			}
-			t.Fatalf("ffmpegArgs() mismatch\n got: %s\nwant: %s\nfirst difference: %s",
+			t.Fatalf("pipeline.FFmpegArgs() mismatch\n got: %s\nwant: %s\nfirst difference: %s",
 				strings.Join(got, " "), strings.Join(tc.want, " "), firstDiff(got, tc.want))
 		})
 	}

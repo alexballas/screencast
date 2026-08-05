@@ -1,7 +1,6 @@
 package hls
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -59,7 +58,7 @@ type Session struct {
 	cmd        *exec.Cmd
 	audioL     net.Listener
 	ffmpegDone chan error
-	stderr     *lockedBuffer
+	stderr     *pipeline.LockedBuffer
 	closeOnce  sync.Once
 }
 
@@ -113,7 +112,7 @@ func Start(options *Options) (*Session, error) {
 	}
 
 	playlistPath := filepath.Join(tempDir, "playlist.m3u8")
-	encoderPlan := pipeline.SelectVideoEncoder(opts.FFmpegPath, baseVideoFilter(fpsArg), gopArg, opts.HLSTimeSeconds, opts.LogOutput, debugEnabled)
+	encoderPlan := pipeline.SelectVideoEncoder(opts.FFmpegPath, pipeline.BaseVideoFilter(fpsArg), gopArg, opts.HLSTimeSeconds, opts.LogOutput, debugEnabled)
 
 	// ffmpeg derives rawvideo timestamps from the frame count and -r, so the
 	// video timeline only tracks real time if we actually feed it fps frames per
@@ -130,7 +129,7 @@ func Start(options *Options) (*Session, error) {
 	audioSource := captureStream.Audio
 	ownAudioSource := false
 	if opts.IncludeAudio && audioSource == nil {
-		audioSource = newSilencePCMReader(48000, 2, 16, 20*time.Millisecond)
+		audioSource = pipeline.NewSilencePCMReader(48000, 2, 16, 20*time.Millisecond)
 		ownAudioSource = true
 		if opts.LogOutput != nil {
 			_, _ = fmt.Fprintln(opts.LogOutput, "screencast audio source: synthetic_silence")
@@ -162,21 +161,21 @@ func Start(options *Options) (*Session, error) {
 		}
 	}
 
-	args := ffmpegArgs(ffmpegArgsParams{
-		debug:          debugEnabled,
-		encoderPlan:    encoderPlan,
-		videoQueueSize: opts.VideoQueueSize,
-		audioQueueSize: opts.AudioQueueSize,
-		pixelFormat:    captureStream.PixelFormat,
-		width:          captureStream.Width,
-		height:         captureStream.Height,
-		fpsArg:         fpsArg,
-		audioEnabled:   audioEnabled,
-		audioURL:       audioURL,
-		muxerArgs:      hlsMuxerArgs(opts, tempDir, playlistPath),
+	args := pipeline.FFmpegArgs(pipeline.FFmpegArgsParams{
+		Debug:          debugEnabled,
+		EncoderPlan:    encoderPlan,
+		VideoQueueSize: opts.VideoQueueSize,
+		AudioQueueSize: opts.AudioQueueSize,
+		PixelFormat:    captureStream.PixelFormat,
+		Width:          captureStream.Width,
+		Height:         captureStream.Height,
+		FpsArg:         fpsArg,
+		AudioEnabled:   audioEnabled,
+		AudioURL:       audioURL,
+		MuxerArgs:      hlsMuxerArgs(opts, tempDir, playlistPath),
 	})
 
-	stderrBuf := &lockedBuffer{}
+	stderrBuf := &pipeline.LockedBuffer{}
 	stderrWriter := io.Writer(stderrBuf)
 	if opts.LogOutput != nil {
 		stderrWriter = io.MultiWriter(opts.LogOutput, stderrWriter)
@@ -235,93 +234,6 @@ func Start(options *Options) (*Session, error) {
 	}
 
 	return s, nil
-}
-
-// baseVideoFilter caps the encode at 720p and holds it to fps, before whatever
-// pixel format the selected encoder needs is appended to it. The trunc pair
-// keeps both dimensions even, which H.264 requires.
-func baseVideoFilter(fpsArg string) string {
-	return fmt.Sprintf(
-		"fps=%s,scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
-		fpsArg,
-	)
-}
-
-// ffmpegArgsParams is everything the ffmpeg command line is derived from.
-// Keeping the vector a pure function of a value lets a test pin the exact
-// arguments without opening a capture backend or spawning anything.
-type ffmpegArgsParams struct {
-	debug          bool
-	encoderPlan    pipeline.VideoEncoderPlan
-	videoQueueSize int
-	audioQueueSize int
-	pixelFormat    string
-	width          uint32
-	height         uint32
-	fpsArg         string
-	audioEnabled   bool
-	audioURL       string
-	// muxerArgs terminate the vector. Everything before them describes the raw
-	// inputs and the encode, neither of which is HLS-specific.
-	muxerArgs []string
-}
-
-func ffmpegArgs(p ffmpegArgsParams) []string {
-	args := []string{}
-	if p.debug {
-		args = append(args, "-loglevel", "debug")
-	}
-	args = append(args, p.encoderPlan.GlobalArgs...)
-	args = append(args,
-		"-fflags", "nobuffer",
-		"-flags", "low_delay",
-		"-probesize", "32",
-		"-analyzeduration", "0",
-		"-thread_queue_size", strconv.Itoa(p.videoQueueSize),
-		"-f", "rawvideo",
-		"-pix_fmt", strings.ToLower(p.pixelFormat),
-		"-s", fmt.Sprintf("%dx%d", p.width, p.height),
-		"-r", p.fpsArg,
-		"-i", "pipe:0",
-	)
-	if p.audioEnabled {
-		args = append(args,
-			"-thread_queue_size", strconv.Itoa(p.audioQueueSize),
-			"-fflags", "nobuffer",
-			"-probesize", "32",
-			"-analyzeduration", "0",
-			"-f", "s16le",
-			"-ar", "48000",
-			"-ac", "2",
-			"-i", p.audioURL,
-			"-map", "0:v:0",
-			"-map", "1:a:0",
-		)
-	} else {
-		args = append(args,
-			"-map", "0:v:0",
-			"-an",
-		)
-	}
-
-	args = append(args,
-		"-r", p.fpsArg,
-	)
-	if strings.TrimSpace(p.encoderPlan.VideoFilter) != "" {
-		args = append(args, "-vf", p.encoderPlan.VideoFilter)
-	}
-	args = append(args, p.encoderPlan.CodecArgs...)
-	if p.audioEnabled {
-		args = append(args,
-			"-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
-			"-c:a", "aac",
-			"-ar", "48000",
-			"-ac", "2",
-		)
-	}
-	args = append(args, p.muxerArgs...)
-
-	return args
 }
 
 func hlsMuxerArgs(opts *Options, tempDir, playlistPath string) []string {
@@ -491,7 +403,7 @@ func normalizeOptions(options *Options) (*Options, error) {
 	return &opts, nil
 }
 
-func waitForPlaylistReady(path, baseDir string, timeout time.Duration, ffmpegDone <-chan error, ffmpegStderr *lockedBuffer) error {
+func waitForPlaylistReady(path, baseDir string, timeout time.Duration, ffmpegDone <-chan error, ffmpegStderr *pipeline.LockedBuffer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -560,69 +472,6 @@ func playlistReady(path, baseDir string) bool {
 	return false
 }
 
-type silencePCMReader struct {
-	bytesPerSecond int
-	chunkBytes     int
-	closed         chan struct{}
-	closeOnce      sync.Once
-}
-
-func newSilencePCMReader(sampleRate, channels, bitsPerSample int, chunkDuration time.Duration) io.ReadCloser {
-	bytesPerSecond := sampleRate * channels * (bitsPerSample / 8)
-	if bytesPerSecond <= 0 {
-		bytesPerSecond = 48000 * 2 * 2
-	}
-	chunkBytes := int((int64(bytesPerSecond) * chunkDuration.Milliseconds()) / 1000)
-	if chunkBytes <= 0 {
-		chunkBytes = 3840
-	}
-	return &silencePCMReader{
-		bytesPerSecond: bytesPerSecond,
-		chunkBytes:     chunkBytes,
-		closed:         make(chan struct{}),
-	}
-}
-
-func (r *silencePCMReader) Read(p []byte) (int, error) {
-	select {
-	case <-r.closed:
-		return 0, io.EOF
-	default:
-	}
-	if len(p) == 0 {
-		return 0, nil
-	}
-
-	n := r.chunkBytes
-	if n > len(p) {
-		n = len(p)
-	}
-	if n <= 0 {
-		n = len(p)
-	}
-	clear(p[:n])
-
-	wait := time.Duration(int64(n) * int64(time.Second) / int64(r.bytesPerSecond))
-	if wait <= 0 {
-		return n, nil
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case <-r.closed:
-		return 0, io.EOF
-	case <-timer.C:
-		return n, nil
-	}
-}
-
-func (r *silencePCMReader) Close() error {
-	r.closeOnce.Do(func() {
-		close(r.closed)
-	})
-	return nil
-}
-
 func cleanupOldTempDirs(prefix string, maxAge time.Duration) {
 	if prefix == "" {
 		prefix = defaultTempDirPrefix
@@ -644,29 +493,4 @@ func cleanupOldTempDirs(prefix string, maxAge time.Duration) {
 		}
 		_ = os.RemoveAll(dir)
 	}
-}
-
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) Tail(n int) string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	s := strings.TrimSpace(b.buf.String())
-	if s == "" {
-		return "no ffmpeg stderr output"
-	}
-	if len(s) <= n {
-		return s
-	}
-	return s[len(s)-n:]
 }
