@@ -199,68 +199,19 @@ func Start(options *Options) (*Session, error) {
 		}
 	}
 
-	args := []string{}
-	if debugEnabled {
-		args = append(args, "-loglevel", "debug")
-	}
-	args = append(args, encoderPlan.globalArgs...)
-	args = append(args,
-		"-fflags", "nobuffer",
-		"-flags", "low_delay",
-		"-probesize", "32",
-		"-analyzeduration", "0",
-		"-thread_queue_size", strconv.Itoa(opts.VideoQueueSize),
-		"-f", "rawvideo",
-		"-pix_fmt", strings.ToLower(captureStream.PixelFormat),
-		"-s", fmt.Sprintf("%dx%d", captureStream.Width, captureStream.Height),
-		"-r", fpsArg,
-		"-i", "pipe:0",
-	)
-	if audioEnabled {
-		args = append(args,
-			"-thread_queue_size", strconv.Itoa(opts.AudioQueueSize),
-			"-fflags", "nobuffer",
-			"-probesize", "32",
-			"-analyzeduration", "0",
-			"-f", "s16le",
-			"-ar", "48000",
-			"-ac", "2",
-			"-i", audioURL,
-			"-map", "0:v:0",
-			"-map", "1:a:0",
-		)
-	} else {
-		args = append(args,
-			"-map", "0:v:0",
-			"-an",
-		)
-	}
-
-	args = append(args,
-		"-r", fpsArg,
-	)
-	if strings.TrimSpace(encoderPlan.videoFilter) != "" {
-		args = append(args, "-vf", encoderPlan.videoFilter)
-	}
-	args = append(args, encoderPlan.codecArgs...)
-	if audioEnabled {
-		args = append(args,
-			"-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
-			"-c:a", "aac",
-			"-ar", "48000",
-			"-ac", "2",
-		)
-	}
-	args = append(args,
-		"-f", "hls",
-		"-hls_time", strconv.Itoa(opts.HLSTimeSeconds),
-		"-hls_list_size", strconv.Itoa(opts.HLSListSize),
-		"-hls_allow_cache", "0",
-		"-hls_flags", "independent_segments+omit_endlist+delete_segments",
-		"-hls_delete_threshold", strconv.Itoa(opts.HLSDeleteThreshold),
-		"-hls_segment_filename", filepath.Join(tempDir, "segment_%03d.ts"),
-		playlistPath,
-	)
+	args := ffmpegArgs(ffmpegArgsParams{
+		debug:          debugEnabled,
+		encoderPlan:    encoderPlan,
+		videoQueueSize: opts.VideoQueueSize,
+		audioQueueSize: opts.AudioQueueSize,
+		pixelFormat:    captureStream.PixelFormat,
+		width:          captureStream.Width,
+		height:         captureStream.Height,
+		fpsArg:         fpsArg,
+		audioEnabled:   audioEnabled,
+		audioURL:       audioURL,
+		muxerArgs:      hlsMuxerArgs(opts, tempDir, playlistPath),
+	})
 
 	stderrBuf := &lockedBuffer{}
 	stderrWriter := io.Writer(stderrBuf)
@@ -321,6 +272,96 @@ func Start(options *Options) (*Session, error) {
 	}
 
 	return s, nil
+}
+
+// ffmpegArgsParams is everything the ffmpeg command line is derived from.
+// Keeping the vector a pure function of a value lets a test pin the exact
+// arguments without opening a capture backend or spawning anything.
+type ffmpegArgsParams struct {
+	debug          bool
+	encoderPlan    videoEncoderPlan
+	videoQueueSize int
+	audioQueueSize int
+	pixelFormat    string
+	width          uint32
+	height         uint32
+	fpsArg         string
+	audioEnabled   bool
+	audioURL       string
+	// muxerArgs terminate the vector. Everything before them describes the raw
+	// inputs and the encode, neither of which is HLS-specific.
+	muxerArgs []string
+}
+
+func ffmpegArgs(p ffmpegArgsParams) []string {
+	args := []string{}
+	if p.debug {
+		args = append(args, "-loglevel", "debug")
+	}
+	args = append(args, p.encoderPlan.globalArgs...)
+	args = append(args,
+		"-fflags", "nobuffer",
+		"-flags", "low_delay",
+		"-probesize", "32",
+		"-analyzeduration", "0",
+		"-thread_queue_size", strconv.Itoa(p.videoQueueSize),
+		"-f", "rawvideo",
+		"-pix_fmt", strings.ToLower(p.pixelFormat),
+		"-s", fmt.Sprintf("%dx%d", p.width, p.height),
+		"-r", p.fpsArg,
+		"-i", "pipe:0",
+	)
+	if p.audioEnabled {
+		args = append(args,
+			"-thread_queue_size", strconv.Itoa(p.audioQueueSize),
+			"-fflags", "nobuffer",
+			"-probesize", "32",
+			"-analyzeduration", "0",
+			"-f", "s16le",
+			"-ar", "48000",
+			"-ac", "2",
+			"-i", p.audioURL,
+			"-map", "0:v:0",
+			"-map", "1:a:0",
+		)
+	} else {
+		args = append(args,
+			"-map", "0:v:0",
+			"-an",
+		)
+	}
+
+	args = append(args,
+		"-r", p.fpsArg,
+	)
+	if strings.TrimSpace(p.encoderPlan.videoFilter) != "" {
+		args = append(args, "-vf", p.encoderPlan.videoFilter)
+	}
+	args = append(args, p.encoderPlan.codecArgs...)
+	if p.audioEnabled {
+		args = append(args,
+			"-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
+			"-c:a", "aac",
+			"-ar", "48000",
+			"-ac", "2",
+		)
+	}
+	args = append(args, p.muxerArgs...)
+
+	return args
+}
+
+func hlsMuxerArgs(opts *Options, tempDir, playlistPath string) []string {
+	return []string{
+		"-f", "hls",
+		"-hls_time", strconv.Itoa(opts.HLSTimeSeconds),
+		"-hls_list_size", strconv.Itoa(opts.HLSListSize),
+		"-hls_allow_cache", "0",
+		"-hls_flags", "independent_segments+omit_endlist+delete_segments",
+		"-hls_delete_threshold", strconv.Itoa(opts.HLSDeleteThreshold),
+		"-hls_segment_filename", filepath.Join(tempDir, "segment_%03d.ts"),
+		playlistPath,
+	}
 }
 
 func (s *Session) Dir() string {
