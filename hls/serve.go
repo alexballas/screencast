@@ -129,14 +129,14 @@ func summarizePlaylist(path string) string {
 	seq := "na"
 	entryCount := 0
 	lastEntry := ""
-	lines := strings.Split(string(b), "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(string(b), "\n")
+	for line := range lines {
 		l := strings.TrimSpace(line)
 		if l == "" {
 			continue
 		}
-		if strings.HasPrefix(l, "#EXT-X-MEDIA-SEQUENCE:") {
-			seq = strings.TrimSpace(strings.TrimPrefix(l, "#EXT-X-MEDIA-SEQUENCE:"))
+		if after, ok := strings.CutPrefix(l, "#EXT-X-MEDIA-SEQUENCE:"); ok {
+			seq = strings.TrimSpace(after)
 			continue
 		}
 		if strings.HasPrefix(l, "#") {

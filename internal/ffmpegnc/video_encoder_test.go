@@ -1,4 +1,4 @@
-package hls
+package ffmpegnc
 
 import (
 	"os"
@@ -10,31 +10,31 @@ import (
 func TestSelectVideoEncoderFallsBackToSoftware(t *testing.T) {
 	t.Parallel()
 
-	plan := selectVideoEncoder("/path/that/does/not/exist/ffmpeg", "fps=30,scale=320:180", "30", 1, nil, false)
-	if plan.codec != "libx264" {
-		t.Fatalf("expected libx264 fallback, got %q", plan.codec)
+	plan := SelectVideoEncoder("/path/that/does/not/exist/ffmpeg", "fps=30,scale=320:180", "30", 1, nil, false)
+	if plan.Codec != "libx264" {
+		t.Fatalf("expected libx264 fallback, got %q", plan.Codec)
 	}
-	if plan.hardware {
+	if plan.Hardware {
 		t.Fatalf("expected software fallback, got hardware plan %+v", plan)
 	}
 }
 
 func TestSelectVideoEncoderUsesWorkingCandidate(t *testing.T) {
 	baseFilter := "fps=30,scale=320:180"
-	candidates := hardwareEncoderCandidates(baseFilter, "30", 1)
+	candidates := hardwareCandidates(baseFilter, "30", 1)
 	if len(candidates) == 0 {
 		t.Skip("no hardware encoder candidates for this platform")
 	}
 
-	expectedCodec := candidates[0].codec
+	expectedCodec := candidates[0].Codec
 	ffmpegPath := writeFakeFFmpeg(t)
 	t.Setenv("FAKE_SUPPORTED_CODEC", expectedCodec)
 
-	plan := selectVideoEncoder(ffmpegPath, baseFilter, "30", 1, nil, false)
-	if plan.codec != expectedCodec {
-		t.Fatalf("expected codec %q, got %q", expectedCodec, plan.codec)
+	plan := SelectVideoEncoder(ffmpegPath, baseFilter, "30", 1, nil, false)
+	if plan.Codec != expectedCodec {
+		t.Fatalf("expected codec %q, got %q", expectedCodec, plan.Codec)
 	}
-	if !plan.hardware {
+	if !plan.Hardware {
 		t.Fatalf("expected hardware plan for codec %q", expectedCodec)
 	}
 }

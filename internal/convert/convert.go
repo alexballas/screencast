@@ -7,9 +7,9 @@ import (
 )
 
 var (
-	boolSignature   = dbus.SignatureOfType(reflect.TypeOf(false))
-	stringSignature = dbus.SignatureOfType(reflect.TypeOf(""))
-	uint32Signature = dbus.SignatureOfType(reflect.TypeOf(uint32(0)))
+	boolSignature   = dbus.SignatureOfType(reflect.TypeFor[bool]())
+	stringSignature = dbus.SignatureOfType(reflect.TypeFor[string]())
+	uint32Signature = dbus.SignatureOfType(reflect.TypeFor[uint32]())
 )
 
 func FromBool(input bool) dbus.Variant {
