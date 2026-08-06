@@ -21,11 +21,12 @@ func TestSessionKeepsCapturedEventInSync(t *testing.T) {
 	tools := avtest.RequireTooling(t)
 
 	const (
-		width    = 320
-		height   = 240
-		fps      = 30
-		flashAt  = 2500 * time.Millisecond
-		flashFor = 200 * time.Millisecond
+		width  = 320
+		height = 240
+		fps    = 30
+		// Placed to sit clear of both detection grids - see avtest.FlashAt.
+		flashAt  = avtest.FlashAt
+		flashFor = avtest.FlashFor
 		// Measured, not budgeted: across repeated runs the skew is deterministic
 		// to one astats frame (~21ms, the audio detection quantum) and never
 		// exceeded 17ms. This leaves roughly 4x headroom for slower hardware

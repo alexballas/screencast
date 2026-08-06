@@ -24,18 +24,20 @@ func TestSessionKeepsCapturedEventInSync(t *testing.T) {
 	tools := avtest.RequireTooling(t)
 
 	const (
-		width    = 320
-		height   = 240
-		fps      = 30
-		flashAt  = 2500 * time.Millisecond
-		flashFor = 200 * time.Millisecond
+		width  = 320
+		height = 240
+		fps    = 30
+		// Placed to sit clear of both detection grids - see avtest.FlashAt.
+		flashAt  = avtest.FlashAt
+		flashFor = avtest.FlashFor
 		// Same budget as the hls measurement, and for the same reason: both
 		// muxers sit behind the same pacer and audio relay, so a structural
-		// desync shows up identically. Measured here across repeated runs the
-		// skew stayed within one astats frame (~21ms, the audio detection
-		// quantum) and never exceeded 16ms, so this leaves roughly 5x headroom
-		// for slower hardware while still failing if the pre-roll discard or
-		// the timeline tracking regresses.
+		// desync shows up identically. Measured across repeated runs the skew
+		// stays well inside one astats frame (~21ms, the audio detection
+		// quantum), so this leaves several times the headroom for slower
+		// hardware while still failing if the pre-roll discard or the timeline
+		// tracking regresses - stubbing out the discard alone moves it to
+		// 124ms.
 		tolerance = 80 * time.Millisecond
 	)
 

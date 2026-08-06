@@ -16,6 +16,33 @@ import (
 	"go2tv.app/screencast/internal/pipeline"
 )
 
+// FlashAt and FlashFor place the event, and the offset is load-bearing rather
+// than arbitrary.
+//
+// The event is located twice in the encoded output: the first video frame
+// bright enough, on a 33.33ms grid at 30fps, and the first AAC frame loud
+// enough, on a 21.33ms one. An onset landing on either boundary lets
+// sub-millisecond jitter decide which frame comes first, and the reading jumps
+// a whole frame. 2500ms is frame 75.0 exactly, and over 50 runs it split the
+// ts measurement between -17ms and +16ms - 33ms apart, one video frame, noise
+// in the detector rather than anything the pipeline did.
+//
+// 2656ms is 10.67ms from the nearest edge of both grids, the most any value can
+// be: half an AAC frame is 10.67ms, so nothing does better on the finer grid.
+// Over 20 runs each, both muxers then centre on -21ms: ts reports it 19 times
+// out of 20 (sd 2.0, down from 15.8 on the boundary), hls 18 times out of 20,
+// its two outliers being one AAC frame away rather than one video frame.
+//
+// That -21ms is this harness, not a desync. lit lights a whole video frame that
+// the flash merely overlaps, so the first lit frame can start 22.7ms before the
+// onset, while audio moves in 10ms chunks and starts at most 6ms early. The
+// picture is therefore expected to lead the sound by roughly 17ms, and both
+// muxers agreeing on that figure is what says the pipeline is even-handed.
+const (
+	FlashAt  = 2656 * time.Millisecond
+	FlashFor = 200 * time.Millisecond
+)
+
 // FlashBeepSource is a synthetic capture backend that emits one unmistakable
 // audiovisual event: a white flash and a full-scale tone, starting at the same
 // instant and lasting the same duration.
