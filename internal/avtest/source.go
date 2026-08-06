@@ -1,4 +1,10 @@
-package hls
+// Package avtest provides the pieces the end-to-end tests share: a synthetic
+// capture backend that emits one simultaneous audiovisual event, and the
+// ffprobe measurements that locate that event in an encoded stream.
+//
+// It lives outside the _test.go files so that every muxer package can measure
+// the same event the same way, instead of each one carrying its own copy.
+package avtest
 
 import (
 	"io"
@@ -10,16 +16,16 @@ import (
 	"go2tv.app/screencast/internal/pipeline"
 )
 
-// flashBeepSource is a synthetic capture backend that emits one unmistakable
+// FlashBeepSource is a synthetic capture backend that emits one unmistakable
 // audiovisual event: a white flash and a full-scale tone, starting at the same
 // instant and lasting the same duration.
 //
 // Both tracks are generated from one start time and one offset counter, so the
 // flash and the beep are simultaneous by construction rather than by timing -
 // there is no scheduling jitter between them to explain away. Whatever
-// separation survives to the encoded HLS output was introduced by the pipeline
+// separation survives to the encoded output was introduced by the pipeline
 // under test, which is the whole measurement.
-type flashBeepSource struct {
+type FlashBeepSource struct {
 	start     time.Time
 	fps       uint32
 	width     uint32
@@ -35,8 +41,8 @@ type flashBeepSource struct {
 	videoDoneOnce sync.Once
 }
 
-func newFlashBeepSource(width, height, fps uint32, flashAt, flashFor time.Duration) *flashBeepSource {
-	return &flashBeepSource{
+func NewFlashBeepSource(width, height, fps uint32, flashAt, flashFor time.Duration) *FlashBeepSource {
+	return &FlashBeepSource{
 		start:     time.Now(),
 		fps:       fps,
 		width:     width,
@@ -48,7 +54,8 @@ func newFlashBeepSource(width, height, fps uint32, flashAt, flashFor time.Durati
 	}
 }
 
-func (s *flashBeepSource) stream() *capture.Stream {
+// Stream presents the source the way a capture backend does.
+func (s *FlashBeepSource) Stream() *capture.Stream {
 	return &capture.Stream{
 		ReadCloser:  &flashBeepVideo{src: s},
 		Audio:       &flashBeepAudio{src: s},
@@ -59,14 +66,19 @@ func (s *flashBeepSource) stream() *capture.Stream {
 	}
 }
 
+// VideoDone closes once the final flash frame has been handed to the pipeline.
+func (s *FlashBeepSource) VideoDone() <-chan struct{} {
+	return s.videoDone
+}
+
 // lit reports whether the event is active over the span [at, at+d).
-func (s *flashBeepSource) lit(at, d time.Duration) bool {
+func (s *FlashBeepSource) lit(at, d time.Duration) bool {
 	return at+d > s.flashAt && at < s.flashAt+s.flashFor
 }
 
 // waitUntil sleeps until due, measured from the shared start, and reports
 // whether the source is still open.
-func (s *flashBeepSource) waitUntil(due time.Duration) bool {
+func (s *FlashBeepSource) waitUntil(due time.Duration) bool {
 	delay := time.Until(s.start.Add(due))
 	if delay <= 0 {
 		select {
@@ -86,14 +98,14 @@ func (s *flashBeepSource) waitUntil(due time.Duration) bool {
 	}
 }
 
-func (s *flashBeepSource) close() {
+func (s *FlashBeepSource) Close() {
 	s.closeOnce.Do(func() { close(s.closed) })
 }
 
 // flashBeepVideo delivers one BGRA frame per frame interval, the shape a capture
 // backend presents to the pacer.
 type flashBeepVideo struct {
-	src   *flashBeepSource
+	src   *FlashBeepSource
 	buf   []byte
 	frame int64
 }
@@ -131,14 +143,14 @@ func (v *flashBeepVideo) Read(p []byte) (int, error) {
 }
 
 func (v *flashBeepVideo) Close() error {
-	v.src.close()
+	v.src.Close()
 	return nil
 }
 
 // flashBeepAudio delivers 48kHz stereo s16le at real-time rate, tone during the
 // flash and digital silence outside it.
 type flashBeepAudio struct {
-	src    *flashBeepSource
+	src    *FlashBeepSource
 	buf    []byte
 	offset int64 // bytes produced so far
 }
@@ -180,6 +192,6 @@ func (a *flashBeepAudio) Read(p []byte) (int, error) {
 }
 
 func (a *flashBeepAudio) Close() error {
-	a.src.close()
+	a.src.Close()
 	return nil
 }

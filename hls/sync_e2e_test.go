@@ -1,72 +1,16 @@
 package hls
 
 import (
-	"encoding/csv"
-	"errors"
-	"fmt"
 	"io"
-	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
 	"go2tv.app/screencast/capture"
+	"go2tv.app/screencast/internal/avtest"
 )
-
-// ffmpegTooling is the external toolchain the end-to-end tests measure with. It
-// is resolved per run rather than assumed: a machine without ffmpeg, without
-// ffprobe, or with a build lacking the analysis filters skips these tests
-// instead of failing them, since none of that is under this package's control.
-type ffmpegTooling struct {
-	ffmpeg  string
-	ffprobe string
-}
-
-// requireFFmpegTooling skips the test unless the full measurement chain is
-// present: both binaries, an encoder that can produce the stream, and the four
-// filters the probes below are built on.
-func requireFFmpegTooling(t *testing.T) ffmpegTooling {
-	t.Helper()
-
-	ffmpegPath, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		t.Skip("ffmpeg not installed: skipping end-to-end sync measurement")
-	}
-	ffprobePath, err := exec.LookPath("ffprobe")
-	if err != nil {
-		t.Skip("ffprobe not installed: skipping end-to-end sync measurement")
-	}
-
-	out, err := exec.Command(ffmpegPath, "-hide_banner", "-filters").Output()
-	if err != nil {
-		t.Skipf("ffmpeg -filters failed (%v): skipping end-to-end sync measurement", err)
-	}
-	for _, name := range []string{"signalstats", "astats", "movie", "amovie"} {
-		if !strings.Contains(string(out), " "+name+" ") {
-			t.Skipf("ffmpeg build lacks the %q filter: skipping end-to-end sync measurement", name)
-		}
-	}
-
-	encoders, err := exec.Command(ffmpegPath, "-hide_banner", "-encoders").Output()
-	if err != nil {
-		t.Skipf("ffmpeg -encoders failed (%v): skipping end-to-end sync measurement", err)
-	}
-	// selectVideoEncoder falls back to libx264, so without it there is no plan
-	// that can encode at all on this machine.
-	if !strings.Contains(string(encoders), " libx264") {
-		t.Skip("ffmpeg build lacks libx264: skipping end-to-end sync measurement")
-	}
-	if !strings.Contains(string(encoders), " aac") {
-		t.Skip("ffmpeg build lacks the aac encoder: skipping end-to-end sync measurement")
-	}
-
-	return ffmpegTooling{ffmpeg: ffmpegPath, ffprobe: ffprobePath}
-}
 
 // The pipeline's whole purpose is that what was captured together plays back
 // together. Feed it one event that is simultaneous by construction - a white
@@ -74,7 +18,7 @@ func requireFFmpegTooling(t *testing.T) ffmpegTooling {
 // output ffmpeg actually wrote and measure how far apart they ended up. This is
 // the only test here that measures the product rather than a component of it.
 func TestSessionKeepsCapturedEventInSync(t *testing.T) {
-	tools := requireFFmpegTooling(t)
+	tools := avtest.RequireTooling(t)
 
 	const (
 		width    = 320
@@ -92,13 +36,13 @@ func TestSessionKeepsCapturedEventInSync(t *testing.T) {
 		tolerance = 80 * time.Millisecond
 	)
 
-	src := newFlashBeepSource(width, height, fps, flashAt, flashFor)
+	src := avtest.NewFlashBeepSource(width, height, fps, flashAt, flashFor)
 	sess := startWithSource(t, tools, src)
 
 	// Wait for the event to be through the source, then let ffmpeg finish the
 	// segments carrying it (hls_time is 1s).
 	select {
-	case <-src.videoDone:
+	case <-src.VideoDone():
 	case <-time.After(flashAt + flashFor + 10*time.Second):
 		t.Fatal("synthetic capture never produced the flash")
 	}
@@ -109,11 +53,11 @@ func TestSessionKeepsCapturedEventInSync(t *testing.T) {
 		t.Fatalf("Session.Close() error = %v", err)
 	}
 
-	flash, err := findVideoFlash(tools, clip)
+	flash, err := tools.FindVideoFlash(clip)
 	if err != nil {
 		t.Fatalf("locating the flash in the encoded output: %v", err)
 	}
-	beep, err := findAudioBeep(tools, clip)
+	beep, err := tools.FindAudioBeep(clip)
 	if err != nil {
 		t.Fatalf("locating the beep in the encoded output: %v", err)
 	}
@@ -130,22 +74,22 @@ func TestSessionKeepsCapturedEventInSync(t *testing.T) {
 			lead = "audio lags the picture"
 		}
 		t.Fatalf("captured simultaneously but encoded %v apart (%s): flash at %v, beep at %v, want within %v",
-			absDuration(skew).Round(time.Millisecond), lead,
+			avtest.AbsDuration(skew).Round(time.Millisecond), lead,
 			flash.Round(time.Millisecond), beep.Round(time.Millisecond), tolerance)
 	}
 }
 
 // startWithSource swaps the capture backend for src and starts a real session
 // against it: real ffmpeg, real encoder selection, real HLS output.
-func startWithSource(t *testing.T, tools ffmpegTooling, src *flashBeepSource) *Session {
+func startWithSource(t *testing.T, tools avtest.Tooling, src *avtest.FlashBeepSource) *Session {
 	t.Helper()
 
 	restore := openCapture
-	openCapture = func(*capture.Options) (*capture.Stream, error) { return src.stream(), nil }
+	openCapture = func(*capture.Options) (*capture.Stream, error) { return src.Stream(), nil }
 	t.Cleanup(func() { openCapture = restore })
 
 	sess, err := Start(&Options{
-		FFmpegPath:     tools.ffmpeg,
+		FFmpegPath:     tools.FFmpeg,
 		IncludeAudio:   true,
 		HLSTimeSeconds: 1,
 		StartupTimeout: 30 * time.Second,
@@ -194,93 +138,4 @@ func collectSegments(t *testing.T, dir string) string {
 		in.Close()
 	}
 	return path
-}
-
-// findVideoFlash returns the presentation time of the first frame bright enough
-// to be the flash. YAVG is the frame's average luma: black frames sit near 16
-// (limited range), the white flash near 235.
-func findVideoFlash(tools ffmpegTooling, clip string) (time.Duration, error) {
-	const lumaThreshold = 128
-	return firstAbove(
-		tools,
-		fmt.Sprintf("movie=%s,signalstats", escapeFilterPath(clip)),
-		"frame=pts_time:frame_tags=lavfi.signalstats.YAVG",
-		func(v float64) bool { return v > lumaThreshold },
-		"no frame reached the flash luma threshold",
-	)
-}
-
-// findAudioBeep returns the presentation time of the first audio frame loud
-// enough to be the tone. astats reports per-frame RMS in dBFS, so digital
-// silence is -inf and the tone lands near -10.
-func findAudioBeep(tools ffmpegTooling, clip string) (time.Duration, error) {
-	const rmsThresholdDB = -40
-	return firstAbove(
-		tools,
-		fmt.Sprintf("amovie=%s,astats=metadata=1:reset=1", escapeFilterPath(clip)),
-		"frame=pts_time:frame_tags=lavfi.astats.Overall.RMS_level",
-		func(v float64) bool { return v > rmsThresholdDB },
-		"no audio frame reached the beep loudness threshold",
-	)
-}
-
-// firstAbove runs one lavfi analysis graph and returns the timestamp of the
-// first frame whose measured value satisfies want.
-func firstAbove(tools ffmpegTooling, graph, entries string, want func(float64) bool, notFound string) (time.Duration, error) {
-	cmd := exec.Command(tools.ffprobe,
-		"-v", "error",
-		"-f", "lavfi",
-		"-i", graph,
-		"-show_entries", entries,
-		"-of", "csv=p=0",
-	)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return 0, fmt.Errorf("ffprobe %q: %w (%s)", graph, err, strings.TrimSpace(stderr.String()))
-	}
-
-	rows := csv.NewReader(strings.NewReader(string(out)))
-	rows.FieldsPerRecord = -1
-	for {
-		row, err := rows.Read()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return 0, fmt.Errorf("parsing ffprobe output: %w", err)
-		}
-		if len(row) < 2 {
-			continue
-		}
-		at, err := strconv.ParseFloat(strings.TrimSpace(row[0]), 64)
-		if err != nil {
-			continue
-		}
-		// Silence reports -inf and a dropped tag reports nothing; neither is a
-		// measurement, so skip rather than treat as a value.
-		value, err := strconv.ParseFloat(strings.TrimSpace(row[1]), 64)
-		if err != nil || math.IsInf(value, 0) || math.IsNaN(value) {
-			continue
-		}
-		if want(value) {
-			return time.Duration(at * float64(time.Second)), nil
-		}
-	}
-	return 0, errors.New(notFound)
-}
-
-// escapeFilterPath quotes a path for use inside a lavfi filter graph, where ':'
-// and '\' separate arguments.
-func escapeFilterPath(path string) string {
-	r := strings.NewReplacer(`\`, `\\`, `:`, `\:`, `'`, `\'`)
-	return r.Replace(path)
-}
-
-func absDuration(d time.Duration) time.Duration {
-	if d < 0 {
-		return -d
-	}
-	return d
 }
