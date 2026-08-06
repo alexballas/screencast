@@ -33,6 +33,10 @@ const (
 	// PMT plus a few video packets, and it lets the first reads drain from
 	// memory while ffmpeg keeps the pipe fed.
 	defaultStartupBytes = m2tsPacketSize * 16
+	// A valid stream announces its PAT and PMT in the first few KiB. Once this
+	// much has arrived without one, the output is not the m2ts we asked for and
+	// waiting out StartupTimeout only buffers megabytes to throw away.
+	maxProbeBytes = 1 << 20
 	// Nothing cuts this stream into segments, so a keyframe every second is
 	// enough to let a renderer join quickly.
 	gopSeconds            = 1
@@ -88,6 +92,18 @@ func (s *Session) Done() <-chan error {
 		return nil
 	}
 	return s.pipe.Done()
+}
+
+// DroppedFrames reports how many video frames the pacer gave up on because
+// ffmpeg could not keep up. Audio is shortened to match, so the stream stays in
+// sync, but the wall clock does not: a count that keeps climbing means the
+// capture is too big or too fast for this machine and the caller should lower
+// the frame rate or resolution.
+func (s *Session) DroppedFrames() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.pipe.DroppedFrames()
 }
 
 func (s *Session) StderrTail(n int) string {
@@ -194,6 +210,7 @@ type streamProbe struct {
 	mu         sync.Mutex
 	buf        bytes.Buffer
 	valid      bool
+	reason     string
 	ready      chan struct{}
 	signalSent bool
 }
@@ -215,8 +232,15 @@ func (p *streamProbe) run(pr io.Reader) {
 		if p.buf.Len() >= defaultStartupBytes && p.hasPATAndPMT() {
 			p.valid = true
 		}
+		gaveUp := !p.valid && p.buf.Len() >= maxProbeBytes
+		if gaveUp {
+			p.reason = fmt.Sprintf(
+				"no PAT/PMT in the first %d bytes (ffmpeg may not be honouring -mpegts_m2ts_mode 1)",
+				maxProbeBytes,
+			)
+		}
 		p.mu.Unlock()
-		if p.valid || err != nil {
+		if p.valid || gaveUp || err != nil {
 			return
 		}
 	}
@@ -229,6 +253,14 @@ func (p *streamProbe) Valid() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.valid
+}
+
+// Reason explains why validation was abandoned, or "" when the probe simply ran
+// out of input.
+func (p *streamProbe) Reason() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.reason
 }
 
 // hasPATAndPMT reports whether the buffered bytes contain a PAT (PID 0) and a
@@ -244,7 +276,9 @@ func (p *streamProbe) hasPATAndPMT() bool {
 			continue
 		}
 		sectionLength := int(pkt[sec+1]&0x0F)<<8 | int(pkt[sec+2])
-		end := sec + 3 + sectionLength
+		// section_length covers everything after it including the trailing
+		// CRC32, so the program entries stop 4 bytes short of the section end.
+		end := sec + 3 + sectionLength - 4
 		for e := sec + 8; e+4 <= end && e+4 <= tsPacketSize; e += 4 {
 			programNumber := uint16(pkt[e])<<8 | uint16(pkt[e+1])
 			if programNumber != 0 {
@@ -280,7 +314,9 @@ func psiSectionStart(pkt []byte) (pid uint16, sec int, ok bool) {
 		return pid, 0, false
 	}
 	switch afc := (pkt[3] >> 4) & 0x03; afc {
-	case 2:
+	case 0, 2:
+		// 0 is reserved and 2 is adaptation field only: neither carries a
+		// payload, so pkt[4] is not a pointer_field.
 		return pid, 0, false
 	case 3:
 		payload := 4 + int(pkt[4]) + 1
@@ -337,6 +373,11 @@ func waitForStream(probe *streamProbe, s *Session, timeout time.Duration) error 
 		if probe.Valid() {
 			return nil
 		}
+		// The probe gave up on a stream ffmpeg is still feeding it, so its own
+		// diagnosis beats waiting for an exit that is not coming.
+		if reason := probe.Reason(); reason != "" {
+			return fmt.Errorf("screencast stream not initialized: %s: %s", reason, tail())
+		}
 		// ffmpeg closed the stream before producing a valid m2ts stream.
 		select {
 		case err, ok := <-s.Done():
@@ -369,8 +410,16 @@ func normalizeOptions(options *Options) (*Options, error) {
 	}
 
 	opts := *options
+	if opts.StreamIndex < 0 {
+		return nil, errors.New("stream index must be >= 0")
+	}
 	if opts.VideoQueueSize == 0 {
 		opts.VideoQueueSize = defaultVideoQueueSize
+	} else if opts.VideoQueueSize < 128 {
+		opts.VideoQueueSize = 128
+	}
+	if opts.VideoQueueSize > 16384 {
+		opts.VideoQueueSize = 16384
 	}
 	if opts.AudioQueueSize == 0 {
 		opts.AudioQueueSize = defaultAudioQueueSize

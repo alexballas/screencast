@@ -67,8 +67,24 @@ func patPacket() []byte {
 	}, patPID, true)
 }
 
+// patPacketCRC is patPacket carrying an explicit CRC32 instead of zeros, so a
+// test can tell a parsed program entry apart from the trailing checksum.
+func patPacketCRC(crc [4]byte) []byte {
+	return m2tsPacket([]byte{
+		0x00, 0x00, 0xB0, 0x0D,
+		0x00, 0x01, 0xC1, 0x00, 0x00,
+		0x00, 0x01, 0x01, 0x00,
+		crc[0], crc[1], crc[2], crc[3],
+	}, patPID, true)
+}
+
 // pmtPacket is a PMT on PID 0x0100 declaring an AVC elementary stream.
 func pmtPacket() []byte {
+	return pmtPacketOn(0x0100)
+}
+
+// pmtPacketOn is pmtPacket on an arbitrary PID.
+func pmtPacketOn(pid uint16) []byte {
 	return m2tsPacket([]byte{
 		0x00, 0x02, 0xB0, 0x11,
 		0x00, 0x01, 0xC1, 0x00, 0x00,
@@ -76,7 +92,7 @@ func pmtPacket() []byte {
 		0xF0, 0x00,
 		0x1B, 0xE1, 0x01, 0xF0, 0x00,
 		0x00, 0x00, 0x00, 0x00,
-	}, 0x0100, true)
+	}, pid, true)
 }
 
 // TestStreamProbe verifies the startup buffer accumulates enough valid MPEG-TS
@@ -136,6 +152,84 @@ func TestStreamProbeRejectsGarbage(t *testing.T) {
 	if probe.Valid() {
 		t.Fatal("probe validated a stream without PAT/PMT")
 	}
+}
+
+// TestStreamProbeIgnoresPATChecksum guards the PAT program loop against running
+// one entry too far into the section CRC32. The CRC here decodes to program
+// 0xABCD on PID 0x0123, and the stream plants a PMT on exactly that PID: if the
+// checksum is parsed as a program entry the bogus PMT satisfies the probe, even
+// though the only real program (PID 0x0100) never announces one.
+func TestStreamProbeIgnoresPATChecksum(t *testing.T) {
+	const crcPID = 0x0123
+	crc := [4]byte{0xAB, 0xCD, 0xE1, 0x23}
+
+	var in bytes.Buffer
+	for range 32 {
+		_, _ = in.Write(patPacketCRC(crc))
+		_, _ = in.Write(pmtPacketOn(crcPID))
+	}
+
+	probe := newStreamProbe()
+	go probe.run(bytes.NewReader(in.Bytes()))
+
+	select {
+	case <-probe.ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("probe never signaled")
+	}
+	if probe.Valid() {
+		t.Fatal("probe parsed the PAT CRC32 as a program entry and validated a stream with no PMT")
+	}
+}
+
+// TestPSISectionStartRejectsNoPayload covers adaptation_field_control 0, which
+// is reserved and carries no payload: pkt[4] is not a pointer_field there, so
+// treating it as one can synthesise a PSI section out of arbitrary bytes.
+func TestPSISectionStartRejectsNoPayload(t *testing.T) {
+	pkt := make([]byte, tsPacketSize)
+	pkt[0] = tsSyncByte
+	pkt[1] = 0x40 // payload_unit_start on PID 0
+	pkt[2] = 0x00
+	pkt[3] = 0x00 // adaptation_field_control = 0, no payload
+	pkt[4] = 0x00 // would read as pointer_field = 0
+	pkt[5] = tableIDPAT
+
+	if _, _, ok := psiSectionStart(pkt); ok {
+		t.Fatal("psiSectionStart accepted a packet with no payload")
+	}
+}
+
+// TestStreamProbeGivesUpOnUnboundedGarbage verifies the probe stops at
+// maxProbeBytes instead of buffering a never-validating stream until the
+// startup timeout expires.
+func TestStreamProbeGivesUpOnUnboundedGarbage(t *testing.T) {
+	probe := newStreamProbe()
+	go probe.run(endlessReader{})
+
+	select {
+	case <-probe.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("probe never gave up on an endless invalid stream")
+	}
+	if probe.Valid() {
+		t.Fatal("probe validated garbage")
+	}
+	if probe.Reason() == "" {
+		t.Fatal("probe gave no reason for abandoning the stream")
+	}
+	if got := probe.Buffered(); got > maxProbeBytes+32*1024 {
+		t.Fatalf("probe buffered %d bytes, want at most ~%d", got, maxProbeBytes)
+	}
+}
+
+// endlessReader is a stream that never ends and never validates.
+type endlessReader struct{}
+
+func (endlessReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0xFF
+	}
+	return len(p), nil
 }
 
 // TestProbeHandlesMalformedPackets feeds adversarial packet bytes through the
