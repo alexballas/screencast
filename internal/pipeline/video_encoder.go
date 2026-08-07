@@ -48,7 +48,7 @@ func SelectVideoEncoder(ffmpegPath, baseFilter, gopArg string, keyframeSeconds i
 
 	if _, err := exec.LookPath(ffmpegPath); err != nil {
 		if debug {
-			DebugPrintf("screencast/hls encoder_probe ffmpeg_lookup_failed path=%q err=%v", ffmpegPath, err)
+			DebugPrintf("screencast/pipeline encoder_probe ffmpeg_lookup_failed path=%q err=%v", ffmpegPath, err)
 		}
 		reportEncoderSelection(logOutput, debug, software, "ffmpeg_not_found")
 		return software
@@ -56,14 +56,14 @@ func SelectVideoEncoder(ffmpegPath, baseFilter, gopArg string, keyframeSeconds i
 
 	available, encErr := ffmpegEncoderSet(ffmpegPath)
 	if encErr != nil && debug {
-		DebugPrintf("screencast/hls encoder_probe ffmpeg_encoders_failed err=%v", encErr)
+		DebugPrintf("screencast/pipeline encoder_probe ffmpeg_encoders_failed err=%v", encErr)
 	}
 
 	for _, candidate := range candidates {
 		if len(available) > 0 {
 			if _, ok := available[candidate.Codec]; !ok {
 				if debug {
-					DebugPrintf("screencast/hls encoder_probe skip encoder=%q reason=not_in_ffmpeg_encoder_list", candidate.Label)
+					DebugPrintf("screencast/pipeline encoder_probe skip encoder=%q reason=not_in_ffmpeg_encoder_list", candidate.Label)
 				}
 				continue
 			}
@@ -72,7 +72,7 @@ func SelectVideoEncoder(ffmpegPath, baseFilter, gopArg string, keyframeSeconds i
 			reportEncoderSelection(logOutput, debug, candidate, "")
 			return candidate
 		} else if debug {
-			DebugPrintf("screencast/hls encoder_probe failed encoder=%q err=%v", candidate.Label, err)
+			DebugPrintf("screencast/pipeline encoder_probe failed encoder=%q err=%v", candidate.Label, err)
 		}
 	}
 
@@ -121,9 +121,9 @@ func reportEncoderSelection(logOutput io.Writer, debug bool, plan VideoEncoderPl
 	}
 	if debug {
 		if reason == "" {
-			DebugPrintf("screencast/hls encoder selected=%q mode=%s", plan.Label, mode)
+			DebugPrintf("screencast/pipeline encoder selected=%q mode=%s", plan.Label, mode)
 		} else {
-			DebugPrintf("screencast/hls encoder selected=%q mode=%s reason=%s", plan.Label, mode, reason)
+			DebugPrintf("screencast/pipeline encoder selected=%q mode=%s reason=%s", plan.Label, mode, reason)
 		}
 	}
 }
@@ -137,7 +137,8 @@ func probeVideoEncoder(ffmpegPath string, plan VideoEncoderPlan) error {
 		"-nostdin",
 	}
 	args = append(args, plan.GlobalArgs...)
-	args = append(args,
+	args = append(
+		args,
 		"-f", "lavfi",
 		"-i", "color=c=black:s=1280x720:r=30:d=0.5",
 		"-an",

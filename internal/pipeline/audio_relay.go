@@ -128,7 +128,7 @@ func startAudioRelay(src io.Reader, chunkSize, queueSize int, skew *timelineSkew
 		dropped := pump.discardBuffered()
 		if debugEnabled {
 			DebugPrintf(
-				"screencast/hls audio_preroll_dropped bytes=%d approx_ms=%d",
+				"screencast/pipeline audio_preroll_dropped bytes=%d approx_ms=%d",
 				dropped,
 				int64(dropped)*1000/AudioBytesPerSecond,
 			)

@@ -129,7 +129,7 @@ func newFramePacer(stream *capture.Stream, fps uint32, skew *timelineSkew) (*fra
 	go p.run(frameSize, fps)
 	if DebugEnabled() {
 		DebugPrintf(
-			"screencast/hls frame_pacer enabled width=%d height=%d fps=%d frame_bytes=%d",
+			"screencast/pipeline frame_pacer enabled width=%d height=%d fps=%d frame_bytes=%d",
 			stream.Width,
 			stream.Height,
 			fps,
@@ -285,7 +285,7 @@ func (p *framePacer) run(frameSize int, fps uint32) {
 				p.skew.drop(skipped, abandoned)
 				if DebugEnabled() {
 					DebugPrintf(
-						"screencast/hls frame_pacer overloaded dropped_frames=%d behind=%s fps=%d total_dropped=%d",
+						"screencast/pipeline frame_pacer overloaded dropped_frames=%d behind=%s fps=%d total_dropped=%d",
 						skipped,
 						abandoned.Round(time.Millisecond),
 						fps,

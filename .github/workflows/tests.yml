@@ -35,9 +35,10 @@ jobs:
             libpipewire-0.3-dev \
             ffmpeg
 
-      # The sync test skips itself when the toolchain cannot perform the
-      # measurement. Assert the same requirements here, so a runner image with a
-      # stripped ffmpeg build fails the job instead of quietly passing it.
+      # avtest.RequireTooling asserts the same list and fails the test when
+      # anything is missing. Checking it here too turns a stripped ffmpeg build
+      # into one clear message about the environment, rather than an encoding
+      # failure several minutes into the suite.
       - name: Verify the ffmpeg toolchain
         run: |
           ffmpeg -version
@@ -70,9 +71,9 @@ jobs:
           set -o pipefail
           go test -v -count=1 -timeout 15m ./... 2>&1 | tee test-output.log
 
-      # A skipped test is a test that did not run. The ffmpeg-backed cases skip
-      # themselves rather than fail on machines without the toolchain, so on a
-      # runner that is meant to have it, treat any skip as a broken environment.
+      # A skipped test is a test that did not run. Nothing here skips itself on
+      # a machine with the toolchain, so on a runner that is meant to have it,
+      # treat any skip as a broken environment.
       - name: Confirm every test ran
         run: |
           if grep -q -- "--- SKIP" test-output.log; then
@@ -80,8 +81,12 @@ jobs:
             grep -- "--- SKIP" test-output.log
             exit 1
           fi
-          if ! grep -q -- "--- PASS: TestSessionKeepsCapturedEventInSync" test-output.log; then
-            echo "::error::the end-to-end ffmpeg sync test did not pass"
+          # hls and ts each measure the same event through their own muxer, and
+          # both tests carry this name. Counting rather than matching keeps the
+          # gate from being satisfied by whichever one still runs.
+          passed=$(grep -c -- "--- PASS: TestSessionKeepsCapturedEventInSync" test-output.log || true)
+          if [ "$passed" -ne 2 ]; then
+            echo "::error::expected the end-to-end sync test to pass for both hls and ts, got $passed"
             exit 1
           fi
 

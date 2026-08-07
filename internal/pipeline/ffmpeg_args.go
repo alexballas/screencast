@@ -41,7 +41,8 @@ func FFmpegArgs(p FFmpegArgsParams) []string {
 		args = append(args, "-loglevel", "debug")
 	}
 	args = append(args, p.EncoderPlan.GlobalArgs...)
-	args = append(args,
+	args = append(
+		args,
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
 		"-probesize", "32",
@@ -54,7 +55,8 @@ func FFmpegArgs(p FFmpegArgsParams) []string {
 		"-i", "pipe:0",
 	)
 	if p.AudioEnabled {
-		args = append(args,
+		args = append(
+			args,
 			"-thread_queue_size", strconv.Itoa(p.AudioQueueSize),
 			"-fflags", "nobuffer",
 			"-probesize", "32",
@@ -67,13 +69,15 @@ func FFmpegArgs(p FFmpegArgsParams) []string {
 			"-map", "1:a:0",
 		)
 	} else {
-		args = append(args,
+		args = append(
+			args,
 			"-map", "0:v:0",
 			"-an",
 		)
 	}
 
-	args = append(args,
+	args = append(
+		args,
 		"-r", p.FpsArg,
 	)
 	if strings.TrimSpace(p.EncoderPlan.VideoFilter) != "" {
@@ -81,7 +85,8 @@ func FFmpegArgs(p FFmpegArgsParams) []string {
 	}
 	args = append(args, p.EncoderPlan.CodecArgs...)
 	if p.AudioEnabled {
-		args = append(args,
+		args = append(
+			args,
 			"-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
 			"-c:a", "aac",
 			"-ar", "48000",

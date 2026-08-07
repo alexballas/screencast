@@ -105,7 +105,7 @@ func Prepare(cfg *Config) (*Prepared, error) {
 	fps := targetFPS(stream)
 	if p.debug {
 		DebugPrintf(
-			"screencast/hls fps_target platform=%s width=%d height=%d source=%d target=%d",
+			"screencast/pipeline fps_target platform=%s width=%d height=%d source=%d target=%d",
 			runtime.GOOS,
 			stream.Width,
 			stream.Height,
@@ -143,7 +143,7 @@ func Prepare(cfg *Config) (*Prepared, error) {
 			_, _ = fmt.Fprintln(p.cfg.LogOutput, "screencast audio source: synthetic_silence")
 		}
 		if p.debug {
-			DebugPrintf("screencast/hls audio_source=synthetic_silence")
+			DebugPrintf("screencast/pipeline audio_source=synthetic_silence")
 		}
 	}
 

@@ -39,9 +39,7 @@ const (
 	maxProbeBytes = 1 << 20
 	// Nothing cuts this stream into segments, so a keyframe every second is
 	// enough to let a renderer join quickly.
-	gopSeconds            = 1
-	defaultVideoQueueSize = 2048
-	defaultAudioQueueSize = 8192
+	gopSeconds = 1
 )
 
 // MPEG-TS constants for the m2ts container (-mpegts_m2ts_mode 1): every packet
@@ -165,7 +163,7 @@ func Start(options *Options) (*Session, error) {
 		pipe:   pipe,
 	}
 
-	if err := waitForStream(probe, s, opts.StartupTimeout); err != nil {
+	if err := waitForStream(probe, pipe, opts.StartupTimeout); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
@@ -360,27 +358,31 @@ func (p *streamProbe) Buffered() int {
 	return p.buf.Len()
 }
 
-func waitForStream(probe *streamProbe, s *Session, timeout time.Duration) error {
-	tail := func() string {
-		if s == nil {
-			return "no ffmpeg stderr output"
-		}
-		return s.StderrTail(300)
-	}
+func waitForStream(probe *streamProbe, pipe *pipeline.Session, timeout time.Duration) error {
+	tail := func() string { return pipe.StderrTail(300) }
 
 	select {
 	case <-probe.ready:
 		if probe.Valid() {
+			if pipeline.DebugEnabled() {
+				pipeline.DebugPrintf("screencast/ts wait_stream ready buffered=%d", probe.Buffered())
+			}
 			return nil
 		}
 		// The probe gave up on a stream ffmpeg is still feeding it, so its own
 		// diagnosis beats waiting for an exit that is not coming.
 		if reason := probe.Reason(); reason != "" {
+			if pipeline.DebugEnabled() {
+				pipeline.DebugPrintf("screencast/ts wait_stream abandoned reason=%q", reason)
+			}
 			return fmt.Errorf("screencast stream not initialized: %s: %s", reason, tail())
 		}
 		// ffmpeg closed the stream before producing a valid m2ts stream.
 		select {
-		case err, ok := <-s.Done():
+		case err, ok := <-pipe.Done():
+			if pipeline.DebugEnabled() {
+				pipeline.DebugPrintf("screencast/ts wait_stream ffmpeg_exit err=%v", err)
+			}
 			if !ok || err == nil {
 				return errors.New("screencast stream not initialized")
 			}
@@ -388,7 +390,10 @@ func waitForStream(probe *streamProbe, s *Session, timeout time.Duration) error 
 		case <-time.After(2 * time.Second):
 		}
 		return fmt.Errorf("screencast stream not initialized: %s", tail())
-	case err, ok := <-s.Done():
+	case err, ok := <-pipe.Done():
+		if pipeline.DebugEnabled() {
+			pipeline.DebugPrintf("screencast/ts wait_stream ffmpeg_exit err=%v", err)
+		}
 		if !ok {
 			return errors.New("screencast stream not initialized")
 		}
@@ -397,6 +402,9 @@ func waitForStream(probe *streamProbe, s *Session, timeout time.Duration) error 
 		}
 		return errors.New("screencast stream not initialized")
 	case <-time.After(timeout):
+		if pipeline.DebugEnabled() {
+			pipeline.DebugPrintf("screencast/ts wait_stream timeout=%s stderr_tail=%q", timeout, tail())
+		}
 		return fmt.Errorf("screencast stream not initialized: %s", tail())
 	}
 }
@@ -413,41 +421,20 @@ func normalizeOptions(options *Options) (*Options, error) {
 	if opts.StreamIndex < 0 {
 		return nil, errors.New("stream index must be >= 0")
 	}
-	if opts.VideoQueueSize == 0 {
-		opts.VideoQueueSize = defaultVideoQueueSize
-	} else if opts.VideoQueueSize < 128 {
-		opts.VideoQueueSize = 128
-	}
-	if opts.VideoQueueSize > 16384 {
-		opts.VideoQueueSize = 16384
-	}
-	if opts.AudioQueueSize == 0 {
-		opts.AudioQueueSize = defaultAudioQueueSize
-	} else if opts.AudioQueueSize < 256 {
-		opts.AudioQueueSize = 256
-	}
-	if opts.AudioQueueSize > 32768 {
-		opts.AudioQueueSize = 32768
-	}
-	if opts.AudioChunkSize == 0 {
-		opts.AudioChunkSize = pipeline.DefaultAudioChunkSize
-	} else if opts.AudioChunkSize < 512 {
-		opts.AudioChunkSize = 512
-	}
-	if opts.AudioChunkSize > 32768 {
-		opts.AudioChunkSize = 32768
-	}
-	if opts.AudioRelayQueue == 0 {
-		opts.AudioRelayQueue = pipeline.DefaultAudioRelayQueue
-	} else if opts.AudioRelayQueue < 8 {
-		opts.AudioRelayQueue = 8
-	}
-	if opts.AudioRelayQueue > 4096 {
-		opts.AudioRelayQueue = 4096
-	}
 	if opts.StartupTimeout <= 0 {
 		opts.StartupTimeout = defaultStartupTimeout
 	}
+
+	queues := pipeline.QueueSizes{
+		Video:      opts.VideoQueueSize,
+		Audio:      opts.AudioQueueSize,
+		AudioChunk: opts.AudioChunkSize,
+		AudioRelay: opts.AudioRelayQueue,
+	}.Normalize()
+	opts.VideoQueueSize = queues.Video
+	opts.AudioQueueSize = queues.Audio
+	opts.AudioChunkSize = queues.AudioChunk
+	opts.AudioRelayQueue = queues.AudioRelay
 
 	return &opts, nil
 }

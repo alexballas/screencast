@@ -94,7 +94,8 @@ func (tools Tooling) FindAudioBeep(clip string) (time.Duration, error) {
 // firstAbove runs one lavfi analysis graph and returns the timestamp of the
 // first frame whose measured value satisfies want.
 func (tools Tooling) firstAbove(graph, entries string, want func(float64) bool, notFound string) (time.Duration, error) {
-	cmd := exec.Command(tools.FFprobe,
+	cmd := exec.Command(
+		tools.FFprobe,
 		"-v", "error",
 		"-f", "lavfi",
 		"-i", graph,

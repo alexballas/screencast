@@ -124,7 +124,7 @@ stream, err := capture.Open(&capture.Options{
 })
 ```
 
-The same index can be forwarded to HLS:
+The same index can be forwarded to either output format:
 
 ```go
 session, err := hls.Start(&hls.Options{
@@ -133,6 +133,42 @@ session, err := hls.Start(&hls.Options{
 	StreamIndex:  1, // same display index selection
 })
 ```
+
+## Output Formats
+
+Both formats sit on the same capture, encoder selection and A/V sync machinery,
+and differ only in how the encoded result is handed back.
+
+- `hls.Start` writes a segmented playlist into a temp directory, for serving over
+  HTTP. Use `Session.Dir()` with `hls.NewDirectoryHandler`.
+- `ts.Start` muxes one continuous MPEG-TS stream and hands it back as a single
+  `io.ReadCloser`. Nothing in it speaks a transport protocol, so it suits a DLNA
+  renderer, a Chromecast, a raw socket or a local player.
+
+```go
+session, err := ts.Start(&ts.Options{
+	FFmpegPath:   "ffmpeg",
+	IncludeAudio: true,
+})
+if err != nil {
+	log.Fatal(err)
+}
+defer session.Close()
+
+// Closing the stream is a no-op: the session owns the ffmpeg process, so hand
+// it to as many consumers as the transport needs without racing the encoder.
+_, _ = io.Copy(w, session.Stream())
+```
+
+The stream is muxed in m2ts mode (192-byte packets with a 4-byte timestamp
+prefix), which is what the DLNA `AVC_TS_MP_HD_AAC_MULT5` profile and the
+`video/vnd.dlna.mpeg-tts` media type require. That profile promises an AAC
+track, so only advertise it with `IncludeAudio` set.
+
+`ts.Start` does not return until it has read enough of ffmpeg's output to prove
+it is really a well-formed m2ts stream - a PAT and the PMT it points at - so a
+renderer is only told to play once there is something valid to play. Those
+startup bytes are handed on to the first reads rather than discarded.
 
 ## Running the Examples
 
@@ -170,7 +206,7 @@ Optional environment variables:
 
 ## End-to-End Debugging
 
-Set one environment variable to enable debug logging across capture, HLS, and ffmpeg paths:
+Set one environment variable to enable debug logging across capture, the encode pipeline, and ffmpeg paths:
 
 ```bash
 SCREENCAST_DEBUG=1
@@ -187,16 +223,17 @@ What `SCREENCAST_DEBUG=1` enables:
 - Capture lifecycle logs on all platforms (Linux/macOS/Windows), including first-frame timing.
 - Windows/macOS async callback queue diagnostics, including slow pipe writes and dropped video frames under pressure.
 - PipeWire internal stream debug logs (Linux backend).
-- ffmpeg command printing and ffmpeg stderr capture in `hls.Start`.
-- ffmpeg `-loglevel debug` in `hls.Start`.
+- ffmpeg command printing and ffmpeg stderr capture in `hls.Start` and `ts.Start`.
+- ffmpeg `-loglevel debug` in `hls.Start` and `ts.Start`.
+- Shared pipeline diagnostics (encoder probe, frame pacer, audio pre-roll), logged under `screencast/pipeline`.
 - HLS HTTP directory handler debug logs in `hls.NewDirectoryHandler`.
 
 What `SCREENCAST_DEBUG_FILE=/path/to/log` does:
 
 - Routes capture debug logs to the file on all platforms (Linux/macOS/Windows).
-- Routes HLS debug logs to the file on all platforms (Linux/macOS/Windows).
+- Routes HLS, MPEG-TS and shared pipeline debug logs to the file on all platforms (Linux/macOS/Windows).
 - Routes PipeWire debug logs to the same file on Linux.
-- If your app provides custom HLS log handlers/writers, debug output is still mirrored to this file.
+- If your app provides custom log handlers/writers, debug output is still mirrored to this file.
 
 Legacy variables still supported:
 
@@ -205,11 +242,13 @@ Legacy variables still supported:
 - `SCREENCAST_PIPEWIRE_DEBUG=1`
 - `SCREENCAST_PIPEWIRE_DEBUG_FILE=/path/to/file`
 
-## HLS Session Notes
+## Session Notes
 
-- `hls.Session` cleanup is idempotent (`Close()` can be called multiple times safely).
+These apply to both `hls.Session` and `ts.Session`, which share the pipeline underneath.
+
+- Session cleanup is idempotent (`Close()` can be called multiple times safely).
 - If ffmpeg exits unexpectedly, session resources are now auto-cleaned.
-- When audio is requested but platform capture audio is unavailable, HLS injects paced synthetic silence so the audio track remains present.
+- When audio is requested but platform capture audio is unavailable, the pipeline injects paced synthetic silence so the audio track remains present.
 - ffmpeg derives timestamps for both raw inputs from byte/frame counts, so both are anchored to the wall clock: video is frame-paced and audio is trimmed/padded to match elapsed real time. Audio captured before ffmpeg attaches is discarded as pre-roll (`SCREENCAST_DEBUG=1` reports `audio_preroll_dropped`).
 - If ffmpeg falls more than a couple of seconds behind, the pacer gives up on the frames it can never emit and the audio relay drops the same span, so the two stay in sync. `Session.DroppedFrames()` reports the running total: a count that keeps climbing means the capture is too big or too fast for the machine, and the caller should lower the frame rate or resolution.
 - Default startup timeout is 60s to reduce transient initialization failures under load.

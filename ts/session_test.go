@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go2tv.app/screencast/capture"
+	"go2tv.app/screencast/internal/pipeline"
 )
 
 func TestNormalizeOptions(t *testing.T) {
@@ -26,11 +27,11 @@ func TestNormalizeOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalizeOptions() error = %v", err)
 	}
-	if opts.VideoQueueSize != defaultVideoQueueSize {
-		t.Fatalf("VideoQueueSize = %d, want %d", opts.VideoQueueSize, defaultVideoQueueSize)
+	if opts.VideoQueueSize != pipeline.DefaultVideoQueueSize {
+		t.Fatalf("VideoQueueSize = %d, want %d", opts.VideoQueueSize, pipeline.DefaultVideoQueueSize)
 	}
-	if opts.AudioQueueSize != defaultAudioQueueSize {
-		t.Fatalf("AudioQueueSize = %d, want %d", opts.AudioQueueSize, defaultAudioQueueSize)
+	if opts.AudioQueueSize != pipeline.DefaultAudioQueueSize {
+		t.Fatalf("AudioQueueSize = %d, want %d", opts.AudioQueueSize, pipeline.DefaultAudioQueueSize)
 	}
 	if opts.StartupTimeout != defaultStartupTimeout {
 		t.Fatalf("StartupTimeout = %v, want %v", opts.StartupTimeout, defaultStartupTimeout)

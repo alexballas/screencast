@@ -12,6 +12,7 @@ extern void winVideoCallbackGo(int id, void* data, uint32_t size, uint32_t width
 extern void winAudioCallbackGo(int id, void* data, uint32_t size);
 */
 import "C"
+
 import (
 	"errors"
 	"fmt"
@@ -186,10 +187,10 @@ func open(options *Options) (*Stream, error) {
 	winStreams[id] = ctxInfo
 	winStreamsMu.Unlock()
 
-	vcb := (C.WinVideoFrameCallback)(C.winVideoCallbackGo)
+	vcb := C.WinVideoFrameCallback(C.winVideoCallbackGo)
 	var acb C.WinAudioFrameCallback
 	if options.IncludeAudio {
-		acb = (C.WinAudioFrameCallback)(C.winAudioCallbackGo)
+		acb = C.WinAudioFrameCallback(C.winAudioCallbackGo)
 	}
 
 	ctx := C.InitWinCapture(C.int(id), C.int(options.StreamIndex), C.bool(options.IncludeAudio), vcb, acb)

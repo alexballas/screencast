@@ -73,7 +73,8 @@ func main() {
 		log.Fatalf("Failed to resolve output path: %v", err)
 	}
 
-	cmd := exec.Command("ffmpeg",
+	cmd := exec.Command(
+		"ffmpeg",
 		"-y",
 		"-re",
 		"-f", "rawvideo",

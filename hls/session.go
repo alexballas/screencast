@@ -19,8 +19,6 @@ const (
 	defaultDeleteThreshold = 36
 	defaultStartupTimeout  = 60 * time.Second
 	defaultTempDirPrefix   = "screencast-hls-"
-	defaultVideoQueueSize  = 2048
-	defaultAudioQueueSize  = 8192
 	defaultHLSTimeSeconds  = 1
 	defaultHLSListSize     = 24
 )
@@ -203,38 +201,17 @@ func normalizeOptions(options *Options) (*Options, error) {
 	if opts.HLSListSize > 120 {
 		opts.HLSListSize = 120
 	}
-	if opts.VideoQueueSize == 0 {
-		opts.VideoQueueSize = defaultVideoQueueSize
-	} else if opts.VideoQueueSize < 128 {
-		opts.VideoQueueSize = 128
-	}
-	if opts.VideoQueueSize > 16384 {
-		opts.VideoQueueSize = 16384
-	}
-	if opts.AudioQueueSize == 0 {
-		opts.AudioQueueSize = defaultAudioQueueSize
-	} else if opts.AudioQueueSize < 256 {
-		opts.AudioQueueSize = 256
-	}
-	if opts.AudioQueueSize > 32768 {
-		opts.AudioQueueSize = 32768
-	}
-	if opts.AudioChunkSize == 0 {
-		opts.AudioChunkSize = pipeline.DefaultAudioChunkSize
-	} else if opts.AudioChunkSize < 512 {
-		opts.AudioChunkSize = 512
-	}
-	if opts.AudioChunkSize > 32768 {
-		opts.AudioChunkSize = 32768
-	}
-	if opts.AudioRelayQueue == 0 {
-		opts.AudioRelayQueue = pipeline.DefaultAudioRelayQueue
-	} else if opts.AudioRelayQueue < 8 {
-		opts.AudioRelayQueue = 8
-	}
-	if opts.AudioRelayQueue > 4096 {
-		opts.AudioRelayQueue = 4096
-	}
+
+	queues := pipeline.QueueSizes{
+		Video:      opts.VideoQueueSize,
+		Audio:      opts.AudioQueueSize,
+		AudioChunk: opts.AudioChunkSize,
+		AudioRelay: opts.AudioRelayQueue,
+	}.Normalize()
+	opts.VideoQueueSize = queues.Video
+	opts.AudioQueueSize = queues.Audio
+	opts.AudioChunkSize = queues.AudioChunk
+	opts.AudioRelayQueue = queues.AudioRelay
 
 	return &opts, nil
 }

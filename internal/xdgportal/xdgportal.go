@@ -96,8 +96,7 @@ type StartOptions struct {
 	HandleToken string
 }
 
-type OpenPipeWireRemoteOptions struct {
-}
+type OpenPipeWireRemoteOptions struct{}
 
 func CreateSession(options *Options) (*Session, error) {
 	data := map[string]dbus.Variant{

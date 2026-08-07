@@ -12,6 +12,7 @@ extern void macVideoCallbackGo(int id, void* data, uint32_t size, uint32_t width
 extern void macAudioCallbackGo(int id, void* data, uint32_t size);
 */
 import "C"
+
 import (
 	"encoding/binary"
 	"errors"
@@ -189,10 +190,10 @@ func open(options *Options) (*Stream, error) {
 	macStreams[id] = ctxInfo
 	macStreamsMu.Unlock()
 
-	vcb := (C.VideoFrameCallback)(C.macVideoCallbackGo)
+	vcb := C.VideoFrameCallback(C.macVideoCallbackGo)
 	var acb C.AudioFrameCallback
 	if options.IncludeAudio {
-		acb = (C.AudioFrameCallback)(C.macAudioCallbackGo)
+		acb = C.AudioFrameCallback(C.macAudioCallbackGo)
 	}
 
 	ctx := C.InitMacCapture(C.int(id), C.int(options.StreamIndex), C.bool(options.IncludeAudio), vcb, acb)
