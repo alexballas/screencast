@@ -198,6 +198,17 @@ func hardwareEncoderCandidates(baseFilter, gopArg string, keyframeSeconds int) [
 	}
 }
 
+// Rate control for a 1080p screencast. 1080p carries 2.25x the pixels of the
+// 720p this used to cap at, so the old 4000k would have spent fewer bits per
+// pixel on a bigger picture and looked worse in motion than the resolution it
+// replaced. maxrate stays 1.25x the target and bufsize 2x maxrate, the ratios
+// the 720p settings used.
+const (
+	videoBitrate = "8000k"
+	videoMaxrate = "10000k"
+	videoBufsize = "20000k"
+)
+
 func hardwareEncoderPlan(codec, label string, globalArgs []string, filter, gopArg string, keyframeSeconds int) VideoEncoderPlan {
 	return VideoEncoderPlan{
 		Label:       label,
@@ -207,9 +218,9 @@ func hardwareEncoderPlan(codec, label string, globalArgs []string, filter, gopAr
 		VideoFilter: filter,
 		CodecArgs: []string{
 			"-c:v", codec,
-			"-b:v", "4000k",
-			"-maxrate", "5000k",
-			"-bufsize", "10000k",
+			"-b:v", videoBitrate,
+			"-maxrate", videoMaxrate,
+			"-bufsize", videoBufsize,
 			"-g", gopArg,
 			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", keyframeSeconds),
 		},
@@ -226,9 +237,9 @@ func softwareEncoderPlan(baseFilter, gopArg string, keyframeSeconds int) VideoEn
 			"-c:v", "libx264",
 			"-preset", "ultrafast",
 			"-tune", "zerolatency",
-			"-b:v", "4000k",
-			"-maxrate", "5000k",
-			"-bufsize", "10000k",
+			"-b:v", videoBitrate,
+			"-maxrate", videoMaxrate,
+			"-bufsize", videoBufsize,
 			"-pix_fmt", "yuv420p",
 			"-g", gopArg,
 			"-keyint_min", gopArg,

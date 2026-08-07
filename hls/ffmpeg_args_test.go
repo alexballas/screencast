@@ -16,7 +16,7 @@ import (
 // exactly rather than asserting on properties of it.
 func TestFFmpegArgs(t *testing.T) {
 	const (
-		baseFilter = "fps=60,scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2"
+		baseFilter = "fps=60,scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2"
 		tempDir    = "/tmp/screencast-hls-golden"
 	)
 
@@ -100,9 +100,9 @@ func TestFFmpegArgs(t *testing.T) {
 				"-c:v", "libx264",
 				"-preset", "ultrafast",
 				"-tune", "zerolatency",
-				"-b:v", "4000k",
-				"-maxrate", "5000k",
-				"-bufsize", "10000k",
+				"-b:v", "8000k",
+				"-maxrate", "10000k",
+				"-bufsize", "20000k",
 				"-pix_fmt", "yuv420p",
 				"-g", "60",
 				"-keyint_min", "60",
@@ -145,9 +145,9 @@ func TestFFmpegArgs(t *testing.T) {
 				"-c:v", "libx264",
 				"-preset", "ultrafast",
 				"-tune", "zerolatency",
-				"-b:v", "4000k",
-				"-maxrate", "5000k",
-				"-bufsize", "10000k",
+				"-b:v", "8000k",
+				"-maxrate", "10000k",
+				"-bufsize", "20000k",
 				"-pix_fmt", "yuv420p",
 				"-g", "60",
 				"-keyint_min", "60",
