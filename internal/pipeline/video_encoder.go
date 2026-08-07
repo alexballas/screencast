@@ -209,6 +209,22 @@ const (
 	videoBufsize = "20000k"
 )
 
+// videoProfile caps every encoder at H.264 Main. Left unset, each backend
+// picks its own default - libx264 lands on Constrained Baseline because
+// ultrafast switches off the tools that define the higher profiles, while
+// h264_vaapi and friends ask for High - so the profile of the output would
+// depend on which machine it ran on. A consumer that has to declare what it is
+// about to send (a DLNA renderer is told up front, and refuses what does not
+// match) cannot describe a moving target, so the cap buys determinism.
+//
+// It costs nothing to pin. On libx264 -profile:v is a ceiling rather than a
+// floor, so this is a no-op there. On the hardware encoders High only pays off
+// when the bitrate is the binding constraint, and at 8000k for desktop content
+// it never is. An encoder with no Main entrypoint fails probeEncoder and the
+// selection falls through to the next candidate, so a cap it cannot honour
+// costs a fallback, not a broken stream.
+const videoProfile = "main"
+
 func hardwareEncoderPlan(codec, label string, globalArgs []string, filter, gopArg string, keyframeSeconds int) VideoEncoderPlan {
 	return VideoEncoderPlan{
 		Label:       label,
@@ -218,6 +234,7 @@ func hardwareEncoderPlan(codec, label string, globalArgs []string, filter, gopAr
 		VideoFilter: filter,
 		CodecArgs: []string{
 			"-c:v", codec,
+			"-profile:v", videoProfile,
 			"-b:v", videoBitrate,
 			"-maxrate", videoMaxrate,
 			"-bufsize", videoBufsize,
@@ -237,6 +254,7 @@ func softwareEncoderPlan(baseFilter, gopArg string, keyframeSeconds int) VideoEn
 			"-c:v", "libx264",
 			"-preset", "ultrafast",
 			"-tune", "zerolatency",
+			"-profile:v", videoProfile,
 			"-b:v", videoBitrate,
 			"-maxrate", videoMaxrate,
 			"-bufsize", videoBufsize,
