@@ -9,6 +9,13 @@ on:
 permissions:
   contents: read
 
+# libspa-0.2.pc exports -fno-strict-overflow as of PipeWire 1.6.0, and cgo's
+# pkg-config flag allowlist does not cover it. SPA compares pointers into
+# different objects and needs the flag for correct codegen, so allow it through
+# rather than strip it. Inert until a runner ships PipeWire 1.6 or newer.
+env:
+  CGO_CFLAGS_ALLOW: -fno-strict-overflow
+
 jobs:
   test:
     name: go test (ubuntu-latest)
