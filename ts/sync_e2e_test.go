@@ -3,7 +3,10 @@ package ts
 import (
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,11 +17,11 @@ import (
 // The muxer's whole purpose is that what was captured together plays back
 // together on a renderer. Feed the pipeline one event that is simultaneous by
 // construction - a white flash and a tone burst generated from the same clock -
-// then decode the m2ts bytes a TV would actually receive and measure how far
+// then decode the TS bytes a TV would actually receive and measure how far
 // apart they ended up.
 //
 // This is the only test here that measures the product rather than a component
-// of it: real ffmpeg, real encoder selection, real m2ts output drained through
+// of it: real ffmpeg, real encoder selection, real TS output drained through
 // Stream() exactly as a renderer drains it.
 func TestSessionKeepsCapturedEventInSync(t *testing.T) {
 	tools := avtest.RequireTooling(t)
@@ -46,7 +49,7 @@ func TestSessionKeepsCapturedEventInSync(t *testing.T) {
 
 	// A renderer has to keep reading or ffmpeg blocks on the stdout pipe, so
 	// drain continuously from the moment the session starts.
-	clip := filepath.Join(t.TempDir(), "clip.m2ts")
+	clip := filepath.Join(t.TempDir(), "clip.ts")
 	out, err := os.Create(clip)
 	if err != nil {
 		t.Fatalf("creating clip: %v", err)
@@ -78,7 +81,8 @@ func TestSessionKeepsCapturedEventInSync(t *testing.T) {
 		t.Fatal("session produced no stream bytes")
 	}
 
-	assertM2TSShape(t, clip, n)
+	assertTSShape(t, clip, n)
+	assertAudioIsDeclaredAAC(t, tools, clip)
 
 	flash, err := tools.FindVideoFlash(clip)
 	if err != nil {
@@ -106,16 +110,18 @@ func TestSessionKeepsCapturedEventInSync(t *testing.T) {
 	}
 }
 
-// assertM2TSShape checks the container invariant the startup probe depends on,
-// against bytes a real ffmpeg produced rather than a hand-built packet: every
-// 192-byte cell carries its TS sync byte 4 bytes in. The unit tests build their
-// own packets, so only this can catch ffmpeg declining -mpegts_m2ts_mode.
+// assertTSShape checks the container invariant the startup probe depends on,
+// against bytes a real ffmpeg produced rather than a hand-built packet: the
+// stream is a whole number of 188-byte packets, each opening with the sync
+// byte. The unit tests build their own packets, so only this can catch ffmpeg
+// emitting a container other than the plain TS the muxer args ask for - 192-byte
+// m2ts cells being the one that would slip through a sync-byte-only check.
 //
 // It also pins the prefixReader handover for free. The first bytes a caller
 // reads come from the probe's startup buffer and the rest from the ffmpeg pipe;
 // if that seam ever dropped or repeated a byte, the alignment checked here
 // would break for every packet after it.
-func assertM2TSShape(t *testing.T, clip string, n int64) {
+func assertTSShape(t *testing.T, clip string, n int64) {
 	t.Helper()
 
 	data, err := os.ReadFile(clip)
@@ -125,26 +131,69 @@ func assertM2TSShape(t *testing.T, clip string, n int64) {
 	if int64(len(data)) != n {
 		t.Fatalf("clip is %d bytes, copier reported %d", len(data), n)
 	}
-	if len(data)%m2tsPacketSize != 0 {
-		t.Errorf("stream is %d bytes, not a whole number of %d-byte m2ts packets", len(data), m2tsPacketSize)
+	if len(data)%tsPacketSize != 0 {
+		t.Errorf("stream is %d bytes, not a whole number of %d-byte TS packets", len(data), tsPacketSize)
 	}
 
 	packets := 0
-	for off := 0; off+m2tsPacketSize <= len(data); off += m2tsPacketSize {
-		if data[off+m2tsHeaderSize] != tsSyncByte {
+	for off := 0; off+tsPacketSize <= len(data); off += tsPacketSize {
+		if data[off] != tsSyncByte {
 			t.Fatalf("packet %d at offset %d: got 0x%02x at the sync position, want 0x%02x",
-				packets, off, data[off+m2tsHeaderSize], tsSyncByte)
+				packets, off, data[off], tsSyncByte)
 		}
 		packets++
 	}
 	if packets == 0 {
-		t.Fatal("stream contained no complete m2ts packets")
+		t.Fatal("stream contained no complete TS packets")
 	}
-	t.Logf("verified %d m2ts packets from a real ffmpeg session", packets)
+	t.Logf("verified %d TS packets from a real ffmpeg session", packets)
+}
+
+// assertAudioIsDeclaredAAC pins the PMT stream_type of the audio track to 0x0F,
+// ISO/IEC 13818-7 ADTS AAC.
+//
+// The beep measured above proves only that the samples are in the stream and on
+// time, which is not the same as a renderer being able to find them: ffmpeg's
+// demuxer probes elementary streams and plays the audio whatever the PMT says.
+// A renderer that trusts the PMT does not. Running the muxer in m2ts mode - the
+// obvious thing to reach for, since the 192-byte packets it produces are what
+// the non-_ISO DLNA profiles ask for - declares this same AAC as stream_type
+// 0x06, PES private data, and GStreamer's tsdemux then creates no pad for it.
+// The picture plays, the sound is silently dropped, and every check above still
+// passes. So assert the declaration, not just the samples.
+func assertAudioIsDeclaredAAC(t *testing.T, tools avtest.Tooling, clip string) {
+	t.Helper()
+
+	const streamTypeADTSAAC = 0x0F
+
+	out, err := exec.Command(tools.FFprobe,
+		"-v", "error",
+		"-select_streams", "a",
+		"-show_entries", "stream=codec_tag",
+		"-of", "csv=p=0",
+		clip,
+	).Output()
+	if err != nil {
+		t.Fatalf("ffprobe on the encoded output: %v", err)
+	}
+
+	// ffmpeg's mpegts demuxer reports the PMT stream_type as the codec tag.
+	field := strings.TrimSpace(string(out))
+	if field == "" {
+		t.Fatal("the encoded output declares no audio stream at all")
+	}
+	tag, err := strconv.ParseUint(strings.TrimPrefix(strings.Fields(field)[0], "0x"), 16, 32)
+	if err != nil {
+		t.Fatalf("parsing codec tag %q: %v", field, err)
+	}
+	if tag != streamTypeADTSAAC {
+		t.Fatalf("PMT declares the audio as stream_type 0x%02x, want 0x%02x (ADTS AAC); "+
+			"a renderer that trusts the PMT will drop the track", tag, streamTypeADTSAAC)
+	}
 }
 
 // startWithSource swaps the capture backend for src and starts a real session
-// against it: real ffmpeg, real encoder selection, real m2ts output.
+// against it: real ffmpeg, real encoder selection, real TS output.
 func startWithSource(t *testing.T, tools avtest.Tooling, src *avtest.FlashBeepSource) *Session {
 	t.Helper()
 
