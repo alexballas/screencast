@@ -38,29 +38,28 @@ func TestNormalizeOptions(t *testing.T) {
 	}
 }
 
-// m2tsPacket builds one 192-byte m2ts packet (4-byte timestamp prefix, 188-byte
-// TS packet) with a payload-unit-start header for the given PID.
-func m2tsPacket(payload []byte, pid uint16, payloadStart bool) []byte {
-	pkt := make([]byte, m2tsPacketSize)
+// tsPacket builds one 188-byte TS packet with a payload-unit-start header for
+// the given PID.
+func tsPacket(payload []byte, pid uint16, payloadStart bool) []byte {
+	pkt := make([]byte, tsPacketSize)
 	for i := range pkt {
 		pkt[i] = 0xFF
 	}
-	pkt[0], pkt[1], pkt[2], pkt[3] = 0x00, 0x0F, 0xFE, 0x80
-	pkt[4] = tsSyncByte
+	pkt[0] = tsSyncByte
 	b1 := byte(pid>>8) & 0x1F
 	if payloadStart {
 		b1 |= 0x40
 	}
-	pkt[5] = b1
-	pkt[6] = byte(pid)
-	pkt[7] = 0x10
-	copy(pkt[8:], payload)
+	pkt[1] = b1
+	pkt[2] = byte(pid)
+	pkt[3] = 0x10
+	copy(pkt[4:], payload)
 	return pkt
 }
 
 // patPacket is a PAT (PID 0) pointing program 1 at PMT PID 0x0100.
 func patPacket() []byte {
-	return m2tsPacket([]byte{
+	return tsPacket([]byte{
 		0x00, 0x00, 0xB0, 0x0D,
 		0x00, 0x01, 0xC1, 0x00, 0x00,
 		0x00, 0x01, 0x01, 0x00,
@@ -71,7 +70,7 @@ func patPacket() []byte {
 // patPacketCRC is patPacket carrying an explicit CRC32 instead of zeros, so a
 // test can tell a parsed program entry apart from the trailing checksum.
 func patPacketCRC(crc [4]byte) []byte {
-	return m2tsPacket([]byte{
+	return tsPacket([]byte{
 		0x00, 0x00, 0xB0, 0x0D,
 		0x00, 0x01, 0xC1, 0x00, 0x00,
 		0x00, 0x01, 0x01, 0x00,
@@ -86,7 +85,7 @@ func pmtPacket() []byte {
 
 // pmtPacketOn is pmtPacket on an arbitrary PID.
 func pmtPacketOn(pid uint16) []byte {
-	return m2tsPacket([]byte{
+	return tsPacket([]byte{
 		0x00, 0x02, 0xB0, 0x11,
 		0x00, 0x01, 0xC1, 0x00, 0x00,
 		0xE1, 0x00,
@@ -127,8 +126,8 @@ func TestStreamProbe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prefixReader read error = %v", err)
 	}
-	if len(all) != buffered+m2tsPacketSize {
-		t.Fatalf("prefixReader yielded %d bytes, want %d (buffer then live source)", len(all), buffered+m2tsPacketSize)
+	if len(all) != buffered+tsPacketSize {
+		t.Fatalf("prefixReader yielded %d bytes, want %d (buffer then live source)", len(all), buffered+tsPacketSize)
 	}
 }
 
@@ -137,7 +136,7 @@ func TestStreamProbe(t *testing.T) {
 func TestStreamProbeRejectsGarbage(t *testing.T) {
 	var in bytes.Buffer
 	for range 64 {
-		pkt := make([]byte, m2tsPacketSize)
+		pkt := make([]byte, tsPacketSize)
 		pkt[0] = 0x47
 		_, _ = in.Write(pkt)
 	}
@@ -240,12 +239,12 @@ func TestProbeHandlesMalformedPackets(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	probe := newStreamProbe()
 	for i := range 4096 {
-		pkt := make([]byte, m2tsPacketSize)
+		pkt := make([]byte, tsPacketSize)
 		if _, err := rng.Read(pkt); err != nil {
 			t.Fatalf("rand read: %v", err)
 		}
 		if i%2 == 0 {
-			pkt[4] = tsSyncByte
+			pkt[0] = tsSyncByte
 		}
 		_, _ = probe.buf.Write(pkt)
 	}
@@ -254,11 +253,10 @@ func TestProbeHandlesMalformedPackets(t *testing.T) {
 	}
 }
 
-// TestStartStreamsM2TS drives Start end to end with a fake ffmpeg so no real
+// TestStartStreamsTS drives Start end to end with a fake ffmpeg so no real
 // ffmpeg or display is needed: the seam replaces capture.Open and the fake
-// binary emits valid 192-byte m2ts packets (PAT + PMT with the sync byte at
-// offset 4, the m2ts shape).
-func TestStartStreamsM2TS(t *testing.T) {
+// binary emits valid 188-byte TS packets (PAT + PMT, sync byte at offset 0).
+func TestStartStreamsTS(t *testing.T) {
 	oldOpen := openCapture
 	t.Cleanup(func() { openCapture = oldOpen })
 
@@ -283,7 +281,7 @@ func TestStartStreamsM2TS(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	// The startup probe must have buffered real TS bytes before Start returned.
-	buf := make([]byte, defaultStartupBytes+m2tsPacketSize)
+	buf := make([]byte, defaultStartupBytes+tsPacketSize)
 	n, err := io.ReadFull(s.Stream(), buf)
 	if err != nil {
 		t.Fatalf("read stream: %v", err)
@@ -291,16 +289,16 @@ func TestStartStreamsM2TS(t *testing.T) {
 	if n < defaultStartupBytes {
 		t.Fatalf("read %d bytes, want at least %d", n, defaultStartupBytes)
 	}
-	for i := 0; i+m2tsPacketSize <= n; i += m2tsPacketSize {
-		if buf[i+m2tsHeaderSize] != 0x47 {
-			t.Fatalf("packet at offset %d missing TS sync byte: got 0x%02x, want 0x47", i, buf[i+m2tsHeaderSize])
+	for i := 0; i+tsPacketSize <= n; i += tsPacketSize {
+		if buf[i] != tsSyncByte {
+			t.Fatalf("packet at offset %d missing TS sync byte: got 0x%02x, want 0x%02x", i, buf[i], tsSyncByte)
 		}
 	}
 }
 
 // writeFakeFFmpeg builds a tiny Go program that answers the encoder probes the
 // way a real ffmpeg would (reports libx264, rejects the lavfi hardware probe)
-// and otherwise streams valid PAT/PMT m2ts packets to stdout forever.
+// and otherwise streams valid PAT/PMT TS packets to stdout forever.
 func writeFakeFFmpeg(t *testing.T) string {
 	t.Helper()
 
@@ -330,9 +328,8 @@ import (
 )
 
 const (
-	tsSyncByte     = 0x47
-	tsPacketSize   = 188
-	m2tsHeaderSize = 4
+	tsSyncByte   = 0x47
+	tsPacketSize = 188
 )
 
 var patPayload = []byte{
@@ -352,20 +349,19 @@ var pmtPayload = []byte{
 }
 
 func packet(payload []byte, pid uint16, payloadStart bool) []byte {
-	pkt := make([]byte, tsPacketSize+m2tsHeaderSize)
+	pkt := make([]byte, tsPacketSize)
 	for i := range pkt {
 		pkt[i] = 0xFF
 	}
-	pkt[0], pkt[1], pkt[2], pkt[3] = 0x00, 0x0F, 0xFE, 0x80
-	pkt[4] = tsSyncByte
+	pkt[0] = tsSyncByte
 	b1 := byte(pid>>8) & 0x1F
 	if payloadStart {
 		b1 |= 0x40
 	}
-	pkt[5] = b1
-	pkt[6] = byte(pid)
-	pkt[7] = 0x10
-	copy(pkt[8:], payload)
+	pkt[1] = b1
+	pkt[2] = byte(pid)
+	pkt[3] = 0x10
+	copy(pkt[4:], payload)
 	return pkt
 }
 
