@@ -127,9 +127,18 @@ func open(options *Options) (*Stream, error) {
 	if frameRate == 0 {
 		frameRate = defaultLinuxFrameRate
 	}
+	// The portal reports the logical size; on scaled (HiDPI) outputs the
+	// buffers carry physical pixels, so the negotiated size wins.
+	width, height := pwStream.NegotiatedSize()
+	if width == 0 || height == 0 {
+		width, height = uint32(selected.Size[0]), uint32(selected.Size[1])
+	}
+	pwStream.SetFrameSize(width, height)
 	captureDebugf(
-		"platform=linux video_ready node_id=%d width=%d height=%d fps=%d",
+		"platform=linux video_ready node_id=%d width=%d height=%d portal_width=%d portal_height=%d fps=%d",
 		selected.NodeID,
+		width,
+		height,
 		selected.Size[0],
 		selected.Size[1],
 		frameRate,
@@ -163,16 +172,16 @@ func open(options *Options) (*Stream, error) {
 	cleanupSession = false
 	captureDebugf(
 		"platform=linux open_ready width=%d height=%d fps=%d include_audio=%t",
-		selected.Size[0],
-		selected.Size[1],
+		width,
+		height,
 		frameRate,
 		options.IncludeAudio,
 	)
 	return &Stream{
 		ReadCloser:  reader,
 		Audio:       audioReader,
-		Width:       uint32(selected.Size[0]),
-		Height:      uint32(selected.Size[1]),
+		Width:       width,
+		Height:      height,
 		FrameRate:   frameRate,
 		PixelFormat: PixelFormatBGRA,
 	}, nil

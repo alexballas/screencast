@@ -81,8 +81,8 @@ static int load_pipewire() {
 }
 
 extern void on_state_changed_go(int id, enum pw_stream_state old, enum pw_stream_state state, char *error);
-extern void on_frame_go(int id, void *data, uint32_t size);
-extern void on_param_changed_go(int id, uint32_t framerate_num, uint32_t framerate_den);
+extern void on_frame_go(int id, void *data, uint32_t size, int32_t stride);
+extern void on_param_changed_go(int id, uint32_t framerate_num, uint32_t framerate_den, uint32_t width, uint32_t height, uint32_t format);
 
 struct go_stream_data {
     int id;
@@ -117,7 +117,7 @@ static void on_param_changed_c(void *userdata, uint32_t id, const struct spa_pod
         return;
     }
 
-    on_param_changed_go(data->id, raw.framerate.num, raw.framerate.denom);
+    on_param_changed_go(data->id, raw.framerate.num, raw.framerate.denom, raw.size.width, raw.size.height, raw.format);
 }
 
 static inline void process_single_buffer(struct go_stream_data *data, struct pw_buffer *pwbuf) {
@@ -159,7 +159,7 @@ static inline void process_single_buffer(struct go_stream_data *data, struct pw_
     }
 
     uint8_t *frame = SPA_PTROFF(d0->data, offset, uint8_t);
-    on_frame_go(data->id, frame, size);
+    on_frame_go(data->id, frame, size, d0->chunk->stride);
 
     d_pw_stream_queue_buffer(data->stream, pwbuf);
 }
@@ -235,14 +235,12 @@ static inline int connect_stream(struct pw_stream *stream, uint32_t target_id, u
         SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
         SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
         SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-        SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(7,
+        // Only 4-byte B,G,R-ordered layouts: frames are handed on as BGRA, so
+        // RGB-ordered or 3-byte formats would be decoded as garbage.
+        SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(3,
             SPA_VIDEO_FORMAT_BGRx,
             SPA_VIDEO_FORMAT_BGRx,
-            SPA_VIDEO_FORMAT_RGBx,
-            SPA_VIDEO_FORMAT_RGBA,
-            SPA_VIDEO_FORMAT_BGRA,
-            SPA_VIDEO_FORMAT_RGB,
-            SPA_VIDEO_FORMAT_BGR),
+            SPA_VIDEO_FORMAT_BGRA),
         SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(
             &SPA_RECTANGLE(width, height),
             &SPA_RECTANGLE(1, 1),
@@ -331,6 +329,9 @@ var ErrLibraryNotLoaded = errors.New("libpipewire-0.3.so.0 could not be loaded")
 const (
 	videoQueueSize = 8
 	audioQueueSize = 384
+
+	// videoBytesPerPixel matches the BGRx/BGRA formats offered in connect_stream.
+	videoBytesPerPixel = 4
 )
 
 type Stream struct {
@@ -365,6 +366,13 @@ type Stream struct {
 	lastFrameWrite atomic.Int64
 	framerateNum   atomic.Uint32
 	framerateDen   atomic.Uint32
+	// srcWidth/srcHeight are the negotiated buffer dimensions; outWidth and
+	// outHeight the frame size promised to the reader via SetFrameSize.
+	srcWidth       atomic.Uint32
+	srcHeight      atomic.Uint32
+	outWidth       atomic.Uint32
+	outHeight      atomic.Uint32
+	framesBadSize  atomic.Uint64
 	formatReady    chan struct{}
 	formatReadySet sync.Once
 }
@@ -572,13 +580,14 @@ func (s *Stream) startDebugStats() {
 				}
 
 				debugf(
-					"stream=%d kind=%s qlen=%d in=%d out=%d drop=%d in_bytes=%d out_bytes=%d write_errs=%d last_write=%s",
+					"stream=%d kind=%s qlen=%d in=%d out=%d drop=%d bad_size=%d in_bytes=%d out_bytes=%d write_errs=%d last_write=%s",
 					s.id,
 					s.kind,
 					len(s.frameCh),
 					s.framesIn.Load(),
 					s.framesWritten.Load(),
 					s.framesDropped.Load(),
+					s.framesBadSize.Load(),
 					s.frameBytesIn.Load(),
 					s.frameBytesOut.Load(),
 					s.writeErrs.Load(),
@@ -589,7 +598,7 @@ func (s *Stream) startDebugStats() {
 	}()
 }
 
-func (s *Stream) enqueueFrame(data unsafe.Pointer, size C.uint32_t) {
+func (s *Stream) enqueueFrame(data unsafe.Pointer, size C.uint32_t, stride C.int32_t) {
 	if s == nil || data == nil || size == 0 || s.closed.Load() {
 		return
 	}
@@ -597,8 +606,19 @@ func (s *Stream) enqueueFrame(data unsafe.Pointer, size C.uint32_t) {
 	s.framesIn.Add(1)
 	s.frameBytesIn.Add(uint64(size))
 
-	buf := make([]byte, int(size))
-	copy(buf, unsafe.Slice((*byte)(data), int(size)))
+	src := unsafe.Slice((*byte)(data), int(size))
+	var buf []byte
+	if s.kind == "video" {
+		buf = s.packVideoFrame(src, int(stride))
+		if buf == nil {
+			s.framesBadSize.Add(1)
+			s.framesDropped.Add(1)
+			return
+		}
+	} else {
+		buf = make([]byte, len(src))
+		copy(buf, src)
+	}
 
 	s.frameMu.RLock()
 	defer s.frameMu.RUnlock()
@@ -621,6 +641,60 @@ func (s *Stream) enqueueFrame(data unsafe.Pointer, size C.uint32_t) {
 			s.framesDropped.Add(1)
 		}
 	}
+}
+
+// packVideoFrame copies one buffer into a tightly packed frame of exactly
+// outWidth*outHeight*4 bytes. The reader consumes raw video by fixed frame
+// size, so a frame of any other size would misalign every frame after it;
+// such frames are dropped instead (nil).
+func (s *Stream) packVideoFrame(src []byte, stride int) []byte {
+	return packFrame(src, stride,
+		int(s.srcWidth.Load()), int(s.srcHeight.Load()),
+		int(s.outWidth.Load()), int(s.outHeight.Load()))
+}
+
+func packFrame(src []byte, stride, srcW, srcH, outW, outH int) []byte {
+	if outW <= 0 || outH <= 0 || srcW != outW || srcH != outH {
+		return nil
+	}
+
+	rowBytes := outW * videoBytesPerPixel
+	if stride <= 0 {
+		stride = rowBytes
+	}
+	if stride < rowBytes || len(src) < stride*(outH-1)+rowBytes {
+		return nil
+	}
+
+	buf := make([]byte, rowBytes*outH)
+	if stride == rowBytes {
+		copy(buf, src)
+		return buf
+	}
+	for y := range outH {
+		copy(buf[y*rowBytes:(y+1)*rowBytes], src[y*stride:])
+	}
+	return buf
+}
+
+// NegotiatedSize returns the buffer size PipeWire negotiated, or 0x0 before
+// the format is known. On HiDPI outputs this is the physical pixel size, which
+// can differ from the logical size the portal reports.
+func (s *Stream) NegotiatedSize() (uint32, uint32) {
+	if s == nil {
+		return 0, 0
+	}
+	return s.srcWidth.Load(), s.srcHeight.Load()
+}
+
+// SetFrameSize fixes the frame size handed to the reader. Frames are dropped
+// until it is set and whenever the negotiated size differs from it.
+func (s *Stream) SetFrameSize(width, height uint32) {
+	if s == nil {
+		return
+	}
+	s.outWidth.Store(width)
+	s.outHeight.Store(height)
 }
 
 func (s *Stream) Close() error {
@@ -734,7 +808,7 @@ func on_state_changed_go(id C.int, old C.enum_pw_stream_state, state C.enum_pw_s
 }
 
 //export on_param_changed_go
-func on_param_changed_go(id C.int, framerateNum C.uint32_t, framerateDen C.uint32_t) {
+func on_param_changed_go(id C.int, framerateNum C.uint32_t, framerateDen C.uint32_t, width C.uint32_t, height C.uint32_t, format C.uint32_t) {
 	streamsMu.Lock()
 	s, ok := streams[int(id)]
 	streamsMu.Unlock()
@@ -742,12 +816,14 @@ func on_param_changed_go(id C.int, framerateNum C.uint32_t, framerateDen C.uint3
 		return
 	}
 
+	s.srcWidth.Store(uint32(width))
+	s.srcHeight.Store(uint32(height))
 	s.setFrameRate(uint32(framerateNum), uint32(framerateDen))
-	debugf("stream=%d kind=%s format framerate=%d/%d", int(id), s.kind, uint32(framerateNum), uint32(framerateDen))
+	debugf("stream=%d kind=%s format framerate=%d/%d size=%dx%d spa_format=%d", int(id), s.kind, uint32(framerateNum), uint32(framerateDen), uint32(width), uint32(height), uint32(format))
 }
 
 //export on_frame_go
-func on_frame_go(id C.int, data unsafe.Pointer, size C.uint32_t) {
+func on_frame_go(id C.int, data unsafe.Pointer, size C.uint32_t, stride C.int32_t) {
 	streamsMu.Lock()
 	s, ok := streams[int(id)]
 	streamsMu.Unlock()
@@ -756,7 +832,7 @@ func on_frame_go(id C.int, data unsafe.Pointer, size C.uint32_t) {
 		return
 	}
 
-	s.enqueueFrame(data, size)
+	s.enqueueFrame(data, size, stride)
 }
 
 func NewAudioStream() (*Stream, error) {
