@@ -2,7 +2,6 @@ package request
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/godbus/dbus/v5"
 	"go2tv.app/screencast/internal/apis"
@@ -42,12 +41,24 @@ func OnSignalResponse(path dbus.ObjectPath) (ResponseStatus, map[string]dbus.Var
 		)
 	}()
 
-	response := <-signal
+	return awaitResponse(signal, path)
+}
+
+// awaitResponse waits for the Response signal of the request at path.
+// dbus.SessionBus is shared process-wide and godbus hands every signal on it
+// to every registered channel, so signals other code subscribed to (e.g. a GUI
+// toolkit watching portal Settings.SettingChanged) arrive here too and are
+// skipped.
+func awaitResponse(signal <-chan *dbus.Signal, path dbus.ObjectPath) (ResponseStatus, map[string]dbus.Variant, error) {
+	var response *dbus.Signal
+	for s := range signal {
+		if s != nil && s.Path == path && s.Name == interfaceName+"."+responseMember {
+			response = s
+			break
+		}
+	}
 	if response == nil {
 		return Ended, nil, ErrUnexpectedResponse
-	}
-	if response.Path != path {
-		return Ended, nil, fmt.Errorf("%w: unexpected signal path %s", ErrUnexpectedResponse, response.Path)
 	}
 	if len(response.Body) != 2 {
 		return Ended, nil, ErrUnexpectedResponse
