@@ -86,7 +86,7 @@ func (p *Prepared) Launch(opts LaunchOptions) (*Session, error) {
 		s.stdout = stdout
 	}
 
-	if err := cmd.Start(); err != nil {
+	if err := processutil.Start(cmd); err != nil {
 		_ = s.Close()
 		return nil, fmt.Errorf("screencast ffmpeg start: %w", err)
 	}
@@ -97,6 +97,7 @@ func (p *Prepared) Launch(opts LaunchOptions) (*Session, error) {
 
 	go func(c *exec.Cmd, done chan error) {
 		err := c.Wait()
+		processutil.Release(c)
 		s.exited.Store(true)
 		done <- err
 		close(done)

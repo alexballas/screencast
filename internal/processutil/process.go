@@ -16,3 +16,14 @@ func Configure(cmd *exec.Cmd) {
 		cmd.Cancel = func() error { return Kill(cmd) }
 	}
 }
+
+// Start starts a long-lived command. On Windows it also binds the process
+// tree to a Job Object, so Kill reaches a wrapper's ffmpeg after the wrapper
+// exits and the tree dies with its parent. Call Release after Wait.
+func Start(cmd *exec.Cmd) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	contain(cmd)
+	return nil
+}
