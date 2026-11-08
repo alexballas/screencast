@@ -85,7 +85,7 @@ func ffmpegEncoderSet(ffmpegPath string) (map[string]struct{}, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-encoders")
-	processutil.HideConsoleWindow(cmd)
+	processutil.Configure(cmd)
 	out, err := cmd.Output()
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("ffmpeg -encoders timeout after %s", encoderProbeTimeout)
@@ -152,7 +152,7 @@ func probeVideoEncoder(ffmpegPath string, plan VideoEncoderPlan) error {
 	args = append(args, "-f", "null", "-")
 
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
-	processutil.HideConsoleWindow(cmd)
+	processutil.Configure(cmd)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

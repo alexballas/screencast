@@ -91,7 +91,7 @@ func main() {
 	cmd.Stdin = stream
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	processutil.HideConsoleWindow(cmd)
+	processutil.Configure(cmd)
 
 	if err := cmd.Start(); err != nil {
 		log.Fatalf("Failed to start ffmpeg: %v", err)

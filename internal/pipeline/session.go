@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go2tv.app/screencast/internal/processutil"
 )
@@ -38,6 +39,7 @@ type Session struct {
 	stderr  *lockedBuffer
 	cleanup func() error
 	done    chan error
+	exited  atomic.Bool
 
 	closeOnce sync.Once
 }
@@ -65,7 +67,7 @@ func (p *Prepared) Launch(opts LaunchOptions) (*Session, error) {
 	cmd := exec.Command(p.cfg.FFmpegPath, full...)
 	cmd.Stdin = p.video
 	cmd.Stderr = stderrWriter
-	processutil.HideConsoleWindow(cmd)
+	processutil.Configure(cmd)
 
 	s := &Session{
 		prep:    p,
@@ -94,7 +96,9 @@ func (p *Prepared) Launch(opts LaunchOptions) (*Session, error) {
 	})
 
 	go func(c *exec.Cmd, done chan error) {
-		done <- c.Wait()
+		err := c.Wait()
+		s.exited.Store(true)
+		done <- err
 		close(done)
 		// Ensure resources are reclaimed even if caller forgets to Close after ffmpeg exits.
 		_ = s.Close()
@@ -151,8 +155,9 @@ func (s *Session) Close() error {
 		// ffmpeg goes first, before anything it reads or writes is closed. It
 		// holds the video pipe and the audio socket, and taking those away from
 		// a live process is a teardown with different rules than this one.
-		if s.cmd != nil && s.cmd.Process != nil {
-			err := s.cmd.Process.Kill()
+		// Once reaped, ffmpeg's PID may name another process.
+		if s.cmd != nil && s.cmd.Process != nil && !s.exited.Load() {
+			err := processutil.Kill(s.cmd)
 			if err != nil && !errors.Is(err, os.ErrProcessDone) {
 				out = errors.Join(out, err)
 			}
